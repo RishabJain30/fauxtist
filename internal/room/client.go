@@ -57,3 +57,11 @@ func (c *Client) trySend(env wsproto.Envelope) {
 	default:
 	}
 }
+
+// NewClientForServer is the exported constructor used by the server package.
+func NewClientForServer(id game.PlayerID, name string, conn *websocket.Conn) *Client {
+	return newClient(id, name, conn)
+}
+
+// WriteLoopForServer runs the client's write pump (exported for the server).
+func (c *Client) WriteLoopForServer(ctx context.Context) { c.writeLoop(ctx) }
