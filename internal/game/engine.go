@@ -93,7 +93,9 @@ func (e *Engine) beginRound(n int) ([]Event, error) {
 	e.state.Strokes = nil
 	e.state.Votes = map[PlayerID]PlayerID{}
 	e.state.ImpostorGuess = ""
-	e.state.LastResult = nil
+	// LastResult intentionally NOT cleared here: it holds the most recently
+	// completed round's result so a client joining mid-next-round can still show
+	// it. finishVoting overwrites it when the current round completes.
 
 	order := make([]PlayerID, len(e.state.Players))
 	for i, p := range e.state.Players {
@@ -150,4 +152,101 @@ func (e *Engine) EndDiscussion(by PlayerID) ([]Event, error) {
 	}
 	e.state.Phase = PhaseVoting
 	return []Event{PhaseChanged{Phase: PhaseVoting}}, nil
+}
+
+// CastVote records a vote. When every player has voted, it tallies results:
+// if the impostor is caught it moves to reveal (impostor may guess in Task 6);
+// otherwise it scores the impostor's win and advances the round.
+func (e *Engine) CastVote(voter, target PlayerID) ([]Event, error) {
+	if e.state.Phase != PhaseVoting {
+		return nil, ErrWrongPhase
+	}
+	if e.playerIndex(voter) < 0 || e.playerIndex(target) < 0 {
+		return nil, ErrUnknownPlayer
+	}
+	if _, done := e.state.Votes[voter]; done {
+		return nil, ErrAlreadyVoted
+	}
+	e.state.Votes[voter] = target
+	events := []Event{VoteRecorded{
+		Voter:      voter,
+		VotesCast:  len(e.state.Votes),
+		VotesTotal: len(e.state.Players),
+	}}
+	if len(e.state.Votes) < len(e.state.Players) {
+		return events, nil
+	}
+	return append(events, e.finishVoting()...), nil
+}
+
+// tally counts votes received per player.
+func (e *Engine) tally() map[PlayerID]int {
+	t := map[PlayerID]int{}
+	for _, target := range e.state.Votes {
+		t[target]++
+	}
+	return t
+}
+
+// caughtByPlurality reports whether the impostor has strictly the most votes.
+func (e *Engine) caughtByPlurality(t map[PlayerID]int) bool {
+	impVotes := t[e.state.ImpostorID]
+	if impVotes == 0 {
+		return false
+	}
+	for id, v := range t {
+		if id != e.state.ImpostorID && v >= impVotes {
+			return false
+		}
+	}
+	return true
+}
+
+// finishVoting evaluates the round once all votes are in.
+func (e *Engine) finishVoting() []Event {
+	t := e.tally()
+	caught := e.caughtByPlurality(t)
+	e.state.LastResult = &RoundResult{
+		ImpostorID: e.state.ImpostorID,
+		Word:       e.state.Word,
+		Caught:     caught,
+		Tally:      t,
+		ScoreDelta: map[PlayerID]int{},
+	}
+	if caught {
+		// Impostor gets a chance to steal the win by guessing the word.
+		e.state.Phase = PhaseReveal
+		return []Event{PhaseChanged{Phase: PhaseReveal}}
+	}
+	// Impostor evaded detection: +2 and advance.
+	e.applyScore(e.state.ImpostorID, 2)
+	return e.endRound()
+}
+
+// applyScore adds delta to a player's score and records it in the round result.
+func (e *Engine) applyScore(id PlayerID, delta int) {
+	for i := range e.state.Players {
+		if e.state.Players[i].ID == id {
+			e.state.Players[i].Score += delta
+		}
+	}
+	if e.state.LastResult != nil {
+		e.state.LastResult.ScoreDelta[id] += delta
+	}
+}
+
+// endRound emits RoundEnded and either starts the next round or ends the game.
+func (e *Engine) endRound() []Event {
+	events := []Event{RoundEnded{Result: *e.state.LastResult}}
+	if e.state.Round >= e.state.TotalRounds {
+		e.state.Phase = PhaseGameOver
+		return append(events, GameEnded{FinalScores: append([]Player(nil), e.state.Players...)})
+	}
+	next, err := e.beginRound(e.state.Round + 1)
+	if err != nil {
+		// Should not happen with a healthy word source; end the game defensively.
+		e.state.Phase = PhaseGameOver
+		return append(events, GameEnded{FinalScores: append([]Player(nil), e.state.Players...)})
+	}
+	return append(events, next...)
 }

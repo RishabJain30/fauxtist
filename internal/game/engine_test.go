@@ -187,3 +187,82 @@ func TestEndDiscussionWrongPhaseRejected(t *testing.T) {
 		t.Fatalf("err = %v, want ErrWrongPhase", err)
 	}
 }
+
+func votingEngine(t *testing.T, n int) *Engine {
+	t.Helper()
+	e := discussionEngine(t, n)
+	if _, err := e.EndDiscussion(PlayerID("a")); err != nil {
+		t.Fatalf("EndDiscussion: %v", err)
+	}
+	return e
+}
+
+func nonImpostors(e *Engine) []PlayerID {
+	var out []PlayerID
+	for _, p := range e.state.Players {
+		if p.ID != e.state.ImpostorID {
+			out = append(out, p.ID)
+		}
+	}
+	return out
+}
+
+func TestVotingCaughtGoesToReveal(t *testing.T) {
+	e := votingEngine(t, 4)
+	imp := e.State().ImpostorID
+	// Everyone (including impostor) votes for the impostor -> plurality -> caught.
+	for _, p := range e.state.Players {
+		if _, err := e.CastVote(p.ID, imp); err != nil {
+			t.Fatalf("vote by %s: %v", p.ID, err)
+		}
+	}
+	if e.State().Phase != PhaseReveal {
+		t.Fatalf("phase = %q, want reveal", e.State().Phase)
+	}
+	if !e.State().LastResult.Caught {
+		t.Fatalf("expected Caught=true")
+	}
+}
+
+func TestVotingNotCaughtImpostorScores(t *testing.T) {
+	e := votingEngine(t, 4)
+	imp := e.State().ImpostorID
+	others := nonImpostors(e)
+	// Each non-impostor votes for a different non-impostor; impostor votes too.
+	// Result: impostor receives zero votes -> not caught.
+	_, _ = e.CastVote(others[0], others[1])
+	_, _ = e.CastVote(others[1], others[2])
+	_, _ = e.CastVote(others[2], others[0])
+	_, err := e.CastVote(imp, others[0])
+	if err != nil {
+		t.Fatalf("impostor vote: %v", err)
+	}
+	s := e.State()
+	if s.LastResult == nil {
+		t.Fatalf("expected a round result")
+	}
+	if s.LastResult.Caught {
+		t.Fatalf("expected Caught=false when impostor gets no votes")
+	}
+	var impScore int
+	for _, p := range s.Players {
+		if p.ID == imp {
+			impScore = p.Score
+		}
+	}
+	if impScore != 2 {
+		t.Fatalf("impostor score = %d, want 2", impScore)
+	}
+}
+
+func TestDoubleVoteRejected(t *testing.T) {
+	e := votingEngine(t, 4)
+	voter := e.state.Players[0].ID
+	target := e.state.Players[1].ID
+	if _, err := e.CastVote(voter, target); err != nil {
+		t.Fatalf("first vote: %v", err)
+	}
+	if _, err := e.CastVote(voter, target); err != ErrAlreadyVoted {
+		t.Fatalf("err = %v, want ErrAlreadyVoted", err)
+	}
+}
