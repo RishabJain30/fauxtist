@@ -1,0 +1,15 @@
+# Go
+/bin/
+*.test
+*.out
+coverage.*
+
+# Frontend (added in the frontend plan)
+/web/node_modules/
+/web/dist/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json

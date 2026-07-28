@@ -1,0 +1,151 @@
+package room
+
+import (
+	"context"
+	"encoding/json"
+	"math/rand"
+	"time"
+
+	"github.com/RishabJain30/fauxtist/internal/game"
+	"github.com/RishabJain30/fauxtist/internal/wordbank"
+	"github.com/RishabJain30/fauxtist/internal/wsproto"
+)
+
+// inbound couples a decoded envelope with its sender.
+type inbound struct {
+	from     game.PlayerID
+	envelope wsproto.Envelope
+}
+
+// joinReq registers a client with the room loop.
+type joinReq struct {
+	client *Client
+	resp   chan struct{}
+}
+
+// Room is the actor goroutine that owns a single game.
+type Room struct {
+	Code    string
+	engine  *game.Engine
+	clients map[game.PlayerID]*Client
+
+	inbox  chan inbound
+	joins  chan joinReq
+	leaves chan game.PlayerID
+	done   chan struct{}
+
+	discussionTimer *time.Timer
+	discussionDur   time.Duration
+}
+
+// NewRoom builds a lobby-phase room. Players are added as they join (Task 12
+// creates their engine entries before the game starts); for simplicity in v1 the
+// engine is created once enough players have joined the lobby.
+func NewRoom(code string, players []game.Player, host game.PlayerID, seed int64) *Room {
+	rng := rand.New(rand.NewSource(seed))
+	wb := wordbank.New(rand.New(rand.NewSource(seed + 1)))
+	return &Room{
+		Code:          code,
+		engine:        game.NewEngine(players, host, len(players), rng, wb),
+		clients:       map[game.PlayerID]*Client{},
+		inbox:         make(chan inbound, 64),
+		joins:         make(chan joinReq, 8),
+		leaves:        make(chan game.PlayerID, 8),
+		done:          make(chan struct{}),
+		discussionDur: 45 * time.Second,
+	}
+}
+
+// Run is the single-goroutine event loop. Nothing else mutates the engine.
+func (r *Room) Run(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-r.done:
+			return
+		case j := <-r.joins:
+			r.clients[j.client.PlayerID] = j.client
+			r.sendSnapshot(j.client)
+			close(j.resp)
+		case id := <-r.leaves:
+			delete(r.clients, id)
+		case msg := <-r.inbox:
+			r.handle(msg)
+		}
+	}
+}
+
+// Join registers a client and blocks until the room has processed it.
+func (r *Room) Join(c *Client) {
+	resp := make(chan struct{})
+	r.joins <- joinReq{client: c, resp: resp}
+	<-resp
+}
+
+// Leave unregisters a client.
+func (r *Room) Leave(id game.PlayerID) { r.leaves <- id }
+
+// Submit hands an inbound message to the loop.
+func (r *Room) Submit(from game.PlayerID, env wsproto.Envelope) {
+	r.inbox <- inbound{from: from, envelope: env}
+}
+
+// handle dispatches one inbound message to the engine and broadcasts events.
+func (r *Room) handle(msg inbound) {
+	switch msg.envelope.Type {
+	case wsproto.TypeStartGame:
+		r.apply(r.engine.StartGame(msg.from))
+	case wsproto.TypeStroke:
+		var p wsproto.StrokePayload
+		if err := json.Unmarshal(msg.envelope.Payload, &p); err != nil {
+			r.sendError(msg.from, "bad stroke payload")
+			return
+		}
+		r.apply(r.engine.AddStroke(msg.from, toStroke(msg.from, p)))
+	case wsproto.TypeEndDiscussion:
+		r.apply(r.engine.EndDiscussion(msg.from))
+	case wsproto.TypeCastVote:
+		var p wsproto.VotePayload
+		if err := json.Unmarshal(msg.envelope.Payload, &p); err != nil {
+			r.sendError(msg.from, "bad vote payload")
+			return
+		}
+		r.apply(r.engine.CastVote(msg.from, game.PlayerID(p.Target)))
+	case wsproto.TypeImpostorGuess:
+		var p wsproto.ImpostorGuessPayload
+		if err := json.Unmarshal(msg.envelope.Payload, &p); err != nil {
+			r.sendError(msg.from, "bad guess payload")
+			return
+		}
+		r.apply(r.engine.ImpostorGuess(msg.from, p.Guess))
+	case wsproto.TypeChatMessage:
+		var p wsproto.ChatPayload
+		if err := json.Unmarshal(msg.envelope.Payload, &p); err != nil {
+			return
+		}
+		r.broadcastChat(msg.from, p.Text)
+	default:
+		r.sendError(msg.from, "unknown message type")
+	}
+}
+
+// apply broadcasts engine events, or ignores a per-action validation error.
+func (r *Room) apply(events []game.Event, err error) {
+	if err != nil {
+		// Validation errors are per-action; the client UI prevents most of them.
+		// Kept explicit so future logging can hook in here.
+		return
+	}
+	for _, ev := range events {
+		r.broadcastEvent(ev)
+	}
+}
+
+func toStroke(by game.PlayerID, p wsproto.StrokePayload) game.Stroke {
+	pts := make([]game.Point, len(p.Points))
+	for i, pt := range p.Points {
+		pts[i] = game.Point{X: pt.X, Y: pt.Y}
+	}
+	return game.Stroke{By: by, Points: pts, Color: p.Color, Width: p.Width}
+}
