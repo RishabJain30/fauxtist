@@ -1,6 +1,9 @@
 package game
 
-import "math/rand"
+import (
+	"math/rand"
+	"strings"
+)
 
 // Engine holds and mutates game state. It is not safe for concurrent use;
 // the owning Room goroutine serializes all calls.
@@ -249,4 +252,30 @@ func (e *Engine) endRound() []Event {
 		return append(events, GameEnded{FinalScores: append([]Player(nil), e.state.Players...)})
 	}
 	return append(events, next...)
+}
+
+// ImpostorGuess resolves the reveal phase after the impostor was caught. A
+// correct guess steals the win (impostor +2); a wrong guess gives every
+// non-impostor +1. Either way the round then advances.
+func (e *Engine) ImpostorGuess(by PlayerID, guess string) ([]Event, error) {
+	if e.state.Phase != PhaseReveal {
+		return nil, ErrWrongPhase
+	}
+	if by != e.state.ImpostorID {
+		return nil, ErrNotImpostor
+	}
+	right := strings.EqualFold(strings.TrimSpace(guess), strings.TrimSpace(e.state.Word))
+	e.state.ImpostorGuess = guess
+	e.state.LastResult.ImpostorGuess = guess
+	e.state.LastResult.ImpostorGuessedRight = right
+	if right {
+		e.applyScore(e.state.ImpostorID, 2)
+	} else {
+		for _, p := range e.state.Players {
+			if p.ID != e.state.ImpostorID {
+				e.applyScore(p.ID, 1)
+			}
+		}
+	}
+	return e.endRound(), nil
 }

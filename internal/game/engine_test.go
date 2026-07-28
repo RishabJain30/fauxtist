@@ -2,6 +2,7 @@ package game
 
 import (
 	"math/rand"
+	"strings"
 	"testing"
 )
 
@@ -264,5 +265,90 @@ func TestDoubleVoteRejected(t *testing.T) {
 	}
 	if _, err := e.CastVote(voter, target); err != ErrAlreadyVoted {
 		t.Fatalf("err = %v, want ErrAlreadyVoted", err)
+	}
+}
+
+func caughtEngine(t *testing.T, n int) *Engine {
+	t.Helper()
+	e := votingEngine(t, n)
+	imp := e.State().ImpostorID
+	for _, p := range e.state.Players {
+		if _, err := e.CastVote(p.ID, imp); err != nil {
+			t.Fatalf("vote: %v", err)
+		}
+	}
+	return e
+}
+
+func TestImpostorGuessRightStealsWin(t *testing.T) {
+	e := caughtEngine(t, 4)
+	imp := e.State().ImpostorID
+	word := e.State().LastResult.Word
+	if _, err := e.ImpostorGuess(imp, strings.ToUpper(word)); err != nil {
+		t.Fatalf("guess: %v", err)
+	}
+	s := e.State()
+	var impScore int
+	for _, p := range s.Players {
+		if p.ID == imp {
+			impScore = p.Score
+		}
+	}
+	if impScore != 2 {
+		t.Fatalf("impostor score = %d, want 2", impScore)
+	}
+}
+
+func TestImpostorGuessWrongOthersScore(t *testing.T) {
+	e := caughtEngine(t, 4)
+	imp := e.State().ImpostorID
+	if _, err := e.ImpostorGuess(imp, "definitely-not-the-word"); err != nil {
+		t.Fatalf("guess: %v", err)
+	}
+	s := e.State()
+	for _, p := range s.Players {
+		if p.ID == imp {
+			if p.Score != 0 {
+				t.Fatalf("impostor score = %d, want 0", p.Score)
+			}
+		} else {
+			if p.Score != 1 {
+				t.Fatalf("non-impostor %s score = %d, want 1", p.ID, p.Score)
+			}
+		}
+	}
+}
+
+func TestOnlyImpostorMayGuess(t *testing.T) {
+	e := caughtEngine(t, 4)
+	nonImp := nonImpostors(e)[0]
+	if _, err := e.ImpostorGuess(nonImp, "x"); err != ErrNotImpostor {
+		t.Fatalf("err = %v, want ErrNotImpostor", err)
+	}
+}
+
+func TestGameEndsAfterFinalRound(t *testing.T) {
+	// totalRounds defaults to len(players); play all rounds and expect game over.
+	e := newTestEngine(t, 4)
+	if _, err := e.StartGame(PlayerID("a")); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	for r := 0; r < 4; r++ {
+		// Drive one full round: draw all strokes, discuss, vote (not caught path).
+		for i := 0; i < 4*e.state.TotalLaps; i++ {
+			d := currentDrawer(e)
+			_, _ = e.AddStroke(d, Stroke{By: d})
+		}
+		_, _ = e.EndDiscussion(PlayerID("a"))
+		imp := e.State().ImpostorID
+		others := nonImpostors(e)
+		// Split votes so the impostor receives none -> not caught.
+		_, _ = e.CastVote(others[0], others[1])
+		_, _ = e.CastVote(others[1], others[2])
+		_, _ = e.CastVote(others[2], others[0])
+		_, _ = e.CastVote(imp, others[0])
+	}
+	if e.State().Phase != PhaseGameOver {
+		t.Fatalf("phase = %q, want game_over", e.State().Phase)
 	}
 }
