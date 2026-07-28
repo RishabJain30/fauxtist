@@ -104,3 +104,37 @@ func (e *Engine) beginRound(n int) ([]Event, error) {
 		TurnChanged{CurrentPlayer: e.state.Players[0].ID, Lap: 0, TotalLaps: e.state.TotalLaps},
 	}, nil
 }
+
+// AddStroke records the current drawer's stroke, advances the turn, and (when
+// all laps are done) transitions to the discussion phase.
+func (e *Engine) AddStroke(by PlayerID, s Stroke) ([]Event, error) {
+	if e.state.Phase != PhaseDrawing {
+		return nil, ErrWrongPhase
+	}
+	if by != e.state.Players[e.state.TurnIndex].ID {
+		return nil, ErrNotYourTurn
+	}
+	s.By = by
+	e.state.Strokes = append(e.state.Strokes, s)
+	events := []Event{StrokeAdded{Stroke: s}}
+	return append(events, e.advanceTurn()...), nil
+}
+
+// advanceTurn moves to the next drawer, wrapping laps, and returns the resulting
+// TurnChanged or (at the end of the final lap) the transition to discussion.
+func (e *Engine) advanceTurn() []Event {
+	e.state.TurnIndex++
+	if e.state.TurnIndex >= len(e.state.Players) {
+		e.state.TurnIndex = 0
+		e.state.Lap++
+		if e.state.Lap >= e.state.TotalLaps {
+			e.state.Phase = PhaseDiscussion
+			return []Event{PhaseChanged{Phase: PhaseDiscussion}}
+		}
+	}
+	return []Event{TurnChanged{
+		CurrentPlayer: e.state.Players[e.state.TurnIndex].ID,
+		Lap:           e.state.Lap,
+		TotalLaps:     e.state.TotalLaps,
+	}}
+}

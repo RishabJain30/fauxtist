@@ -101,3 +101,56 @@ func TestStartGameRejectsTooFewPlayers(t *testing.T) {
 		t.Fatalf("err = %v, want ErrTooFewPlayers", err)
 	}
 }
+
+func startedEngine(t *testing.T, n int) *Engine {
+	t.Helper()
+	e := newTestEngine(t, n)
+	if _, err := e.StartGame(PlayerID("a")); err != nil {
+		t.Fatalf("StartGame: %v", err)
+	}
+	return e
+}
+
+func currentDrawer(e *Engine) PlayerID {
+	return e.state.Players[e.state.TurnIndex].ID
+}
+
+func TestAddStrokeAdvancesTurn(t *testing.T) {
+	e := startedEngine(t, 4)
+	drawer := currentDrawer(e)
+	_, err := e.AddStroke(drawer, Stroke{By: drawer, Points: []Point{{X: 0.1, Y: 0.1}}})
+	if err != nil {
+		t.Fatalf("AddStroke: %v", err)
+	}
+	if e.state.TurnIndex != 1 {
+		t.Fatalf("turnIndex = %d, want 1", e.state.TurnIndex)
+	}
+	if len(e.State().Strokes) != 1 {
+		t.Fatalf("strokes = %d, want 1", len(e.State().Strokes))
+	}
+}
+
+func TestAddStrokeRejectsOutOfTurn(t *testing.T) {
+	e := startedEngine(t, 4)
+	notDrawer := e.state.Players[1].ID
+	if _, err := e.AddStroke(notDrawer, Stroke{By: notDrawer}); err != ErrNotYourTurn {
+		t.Fatalf("err = %v, want ErrNotYourTurn", err)
+	}
+}
+
+func TestDrawingEndsAfterAllLaps(t *testing.T) {
+	e := startedEngine(t, 4)
+	// 4 players * 2 laps = 8 strokes total.
+	for i := 0; i < 8; i++ {
+		d := currentDrawer(e)
+		if _, err := e.AddStroke(d, Stroke{By: d, Points: []Point{{X: 0.5, Y: 0.5}}}); err != nil {
+			t.Fatalf("stroke %d: %v", i, err)
+		}
+	}
+	if e.State().Phase != PhaseDiscussion {
+		t.Fatalf("phase = %q, want discussion", e.State().Phase)
+	}
+	if len(e.State().Strokes) != 8 {
+		t.Fatalf("strokes = %d, want 8", len(e.State().Strokes))
+	}
+}
