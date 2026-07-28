@@ -53,3 +53,51 @@ func TestNewEngineStartsInLobby(t *testing.T) {
 		t.Fatalf("totalRounds = %d, want 4", s.TotalRounds)
 	}
 }
+
+func TestStartGameAssignsWordAndImpostor(t *testing.T) {
+	e := newTestEngine(t, 4)
+	events, err := e.StartGame(PlayerID("a"))
+	if err != nil {
+		t.Fatalf("StartGame error: %v", err)
+	}
+	s := e.State()
+	if s.Phase != PhaseDrawing {
+		t.Fatalf("phase = %q, want drawing", s.Phase)
+	}
+	if s.Round != 1 {
+		t.Fatalf("round = %d, want 1", s.Round)
+	}
+	if s.Word != "Giraffe" || s.Category != "Animal" {
+		t.Fatalf("got %q/%q, want Animal/Giraffe", s.Category, s.Word)
+	}
+	if e.playerIndex(s.ImpostorID) < 0 {
+		t.Fatalf("impostor %q is not a valid player", s.ImpostorID)
+	}
+	// Expect a RoundStarted and a TurnChanged event.
+	var sawRound, sawTurn bool
+	for _, ev := range events {
+		switch ev.(type) {
+		case RoundStarted:
+			sawRound = true
+		case TurnChanged:
+			sawTurn = true
+		}
+	}
+	if !sawRound || !sawTurn {
+		t.Fatalf("events missing: round=%v turn=%v", sawRound, sawTurn)
+	}
+}
+
+func TestStartGameRejectsNonHost(t *testing.T) {
+	e := newTestEngine(t, 4)
+	if _, err := e.StartGame(PlayerID("b")); err != ErrNotHost {
+		t.Fatalf("err = %v, want ErrNotHost", err)
+	}
+}
+
+func TestStartGameRejectsTooFewPlayers(t *testing.T) {
+	e := newTestEngine(t, 3)
+	if _, err := e.StartGame(PlayerID("a")); err != ErrTooFewPlayers {
+		t.Fatalf("err = %v, want ErrTooFewPlayers", err)
+	}
+}
