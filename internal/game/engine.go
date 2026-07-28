@@ -138,3 +138,16 @@ func (e *Engine) advanceTurn() []Event {
 		TotalLaps:     e.state.TotalLaps,
 	}}
 }
+
+// EndDiscussion moves from discussion to voting. Triggered by the host or by the
+// room's discussion timer (the room passes the host ID in the timer case).
+func (e *Engine) EndDiscussion(by PlayerID) ([]Event, error) {
+	if e.state.Phase != PhaseDiscussion {
+		return nil, ErrWrongPhase
+	}
+	if by != e.state.HostID {
+		return nil, ErrNotHost
+	}
+	e.state.Phase = PhaseVoting
+	return []Event{PhaseChanged{Phase: PhaseVoting}}, nil
+}

@@ -154,3 +154,36 @@ func TestDrawingEndsAfterAllLaps(t *testing.T) {
 		t.Fatalf("strokes = %d, want 8", len(e.State().Strokes))
 	}
 }
+
+func discussionEngine(t *testing.T, n int) *Engine {
+	t.Helper()
+	e := startedEngine(t, n)
+	for i := 0; i < n*e.state.TotalLaps; i++ {
+		d := currentDrawer(e)
+		if _, err := e.AddStroke(d, Stroke{By: d}); err != nil {
+			t.Fatalf("stroke %d: %v", i, err)
+		}
+	}
+	return e
+}
+
+func TestEndDiscussionMovesToVoting(t *testing.T) {
+	e := discussionEngine(t, 4)
+	events, err := e.EndDiscussion(PlayerID("a"))
+	if err != nil {
+		t.Fatalf("EndDiscussion: %v", err)
+	}
+	if e.State().Phase != PhaseVoting {
+		t.Fatalf("phase = %q, want voting", e.State().Phase)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+}
+
+func TestEndDiscussionWrongPhaseRejected(t *testing.T) {
+	e := startedEngine(t, 4) // still drawing
+	if _, err := e.EndDiscussion(PlayerID("a")); err != ErrWrongPhase {
+		t.Fatalf("err = %v, want ErrWrongPhase", err)
+	}
+}
