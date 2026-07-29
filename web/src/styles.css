@@ -1,0 +1,15 @@
+:root { --bg:#12121a; --panel:#1e1e2b; --accent:#7c5cff; --text:#e8e8f0; --muted:#9a9ab0; }
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--text); font-family: system-ui, sans-serif; }
+button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:10px 16px; font-size:14px; cursor:pointer; }
+button:disabled { opacity:.4; cursor:not-allowed; }
+input { background:var(--panel); border:1px solid #33334a; color:var(--text); border-radius:8px; padding:10px; font-size:14px; }
+.center { min-height:100vh; display:flex; align-items:center; justify-content:center; }
+.card { background:var(--panel); padding:24px; border-radius:14px; width:min(720px,92vw); }
+.row { display:flex; gap:12px; align-items:center; }
+.col { display:flex; flex-direction:column; gap:12px; }
+.muted { color:var(--muted); }
+.players li { padding:6px 0; }
+.me { color:var(--accent); font-weight:600; }
+canvas { background:#fff; border-radius:12px; touch-action:none; width:100%; aspect-ratio:4/3; }
+.badge { background:#33334a; border-radius:6px; padding:2px 8px; font-size:12px; }
