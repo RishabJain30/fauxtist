@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io/fs"
 	"net/http"
+	"os"
 	"strings"
 
 	"nhooyr.io/websocket"
@@ -74,7 +75,7 @@ func (s *Server) joinRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		OriginPatterns: []string{"*"}, // dev; tightened for the prod deploy in Plan 2
+		OriginPatterns: allowedOrigins(),
 	})
 	if err != nil {
 		return
@@ -119,6 +120,19 @@ func readJoin(ctx context.Context, conn *websocket.Conn, code string) (string, g
 		return p.Name, game.PlayerID(p.ReconnectToken), nil
 	}
 	return p.Name, game.PlayerID(code + "-" + p.Name), nil
+}
+
+// allowedOrigins restricts WebSocket upgrades to the deployed host when
+// RENDER_EXTERNAL_HOSTNAME (set automatically by Render) or ALLOWED_ORIGIN is
+// present; otherwise it allows all origins for local development.
+func allowedOrigins() []string {
+	if h := os.Getenv("RENDER_EXTERNAL_HOSTNAME"); h != "" {
+		return []string{h}
+	}
+	if o := os.Getenv("ALLOWED_ORIGIN"); o != "" {
+		return []string{o}
+	}
+	return []string{"*"}
 }
 
 // spaHandler serves embedded static files, falling back to index.html for
