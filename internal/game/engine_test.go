@@ -327,6 +327,54 @@ func TestOnlyImpostorMayGuess(t *testing.T) {
 	}
 }
 
+func TestUpsertPlayerAddsDuringLobby(t *testing.T) {
+	e := newTestEngine(t, 4)
+	if err := e.UpsertPlayer(Player{ID: "z", Name: "Zoe"}); err != nil {
+		t.Fatalf("UpsertPlayer: %v", err)
+	}
+	if len(e.State().Players) != 5 {
+		t.Fatalf("players = %d, want 5", len(e.State().Players))
+	}
+}
+
+func TestUpsertPlayerRenamesExisting(t *testing.T) {
+	e := newTestEngine(t, 4)
+	if err := e.UpsertPlayer(Player{ID: "a", Name: "Alice2"}); err != nil {
+		t.Fatalf("UpsertPlayer: %v", err)
+	}
+	if len(e.State().Players) != 4 {
+		t.Fatalf("players = %d, want 4 (rename, not add)", len(e.State().Players))
+	}
+	if e.State().Players[0].Name != "Alice2" {
+		t.Fatalf("name = %q, want Alice2", e.State().Players[0].Name)
+	}
+}
+
+func TestUpsertPlayerRejectsNewAfterStart(t *testing.T) {
+	e := startedEngine(t, 4)
+	if err := e.UpsertPlayer(Player{ID: "z", Name: "Zoe"}); err != ErrWrongPhase {
+		t.Fatalf("err = %v, want ErrWrongPhase", err)
+	}
+}
+
+func TestUpsertPlayerRejectsWhenFull(t *testing.T) {
+	e := newTestEngine(t, MaxPlayers)
+	if err := e.UpsertPlayer(Player{ID: "over", Name: "Over"}); err != ErrRoomFull {
+		t.Fatalf("err = %v, want ErrRoomFull", err)
+	}
+}
+
+func TestStartGameScalesRoundsToPlayers(t *testing.T) {
+	e := newTestEngine(t, 4)
+	_ = e.UpsertPlayer(Player{ID: "e", Name: "Eve"}) // now 5 players
+	if _, err := e.StartGame(PlayerID("a")); err != nil {
+		t.Fatalf("StartGame: %v", err)
+	}
+	if e.State().TotalRounds != 5 {
+		t.Fatalf("totalRounds = %d, want 5", e.State().TotalRounds)
+	}
+}
+
 func TestGameEndsAfterFinalRound(t *testing.T) {
 	// totalRounds defaults to len(players); play all rounds and expect game over.
 	e := newTestEngine(t, 4)

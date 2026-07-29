@@ -11,7 +11,11 @@ var (
 	ErrAlreadyVoted  = errors.New("player already voted")
 	ErrNotImpostor   = errors.New("only the impostor may guess")
 	ErrNoWords       = errors.New("word source exhausted")
+	ErrRoomFull      = errors.New("room is full")
 )
 
 // MinPlayers is the minimum required to start a game.
 const MinPlayers = 4
+
+// MaxPlayers is the maximum roster size for a room.
+const MaxPlayers = 8

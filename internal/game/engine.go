@@ -67,8 +67,29 @@ func (e *Engine) StartGame(by PlayerID) ([]Event, error) {
 	}
 	// Precompute a shuffled impostor order so each player is impostor at most
 	// once before any repeats.
+	e.state.TotalRounds = len(e.state.Players)
 	e.impostorOrder = e.rng.Perm(len(e.state.Players))
 	return e.beginRound(1)
+}
+
+// UpsertPlayer adds a new player during the lobby, or renames an existing one
+// (any phase, for reconnects). New players are rejected once the game has
+// started or the room is full.
+func (e *Engine) UpsertPlayer(p Player) error {
+	if i := e.playerIndex(p.ID); i >= 0 {
+		if p.Name != "" {
+			e.state.Players[i].Name = p.Name
+		}
+		return nil
+	}
+	if e.state.Phase != PhaseLobby {
+		return ErrWrongPhase
+	}
+	if len(e.state.Players) >= MaxPlayers {
+		return ErrRoomFull
+	}
+	e.state.Players = append(e.state.Players, p)
+	return nil
 }
 
 // beginRound sets up round n: picks a word, assigns the impostor, resets the
