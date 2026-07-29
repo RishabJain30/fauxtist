@@ -20,7 +20,7 @@ type inbound struct {
 // joinReq registers a client with the room loop.
 type joinReq struct {
 	client *Client
-	resp   chan struct{}
+	resp   chan error
 }
 
 // Room is the actor goroutine that owns a single game.
@@ -65,22 +65,30 @@ func (r *Room) Run(ctx context.Context) {
 		case <-r.done:
 			return
 		case j := <-r.joins:
+			err := r.engine.UpsertPlayer(game.Player{ID: j.client.PlayerID, Name: j.client.Name})
+			if err != nil {
+				j.resp <- err
+				continue
+			}
 			r.clients[j.client.PlayerID] = j.client
 			r.sendSnapshot(j.client)
-			close(j.resp)
+			r.broadcastLobby()
+			j.resp <- nil
 		case id := <-r.leaves:
 			delete(r.clients, id)
+			r.broadcastPlayerLeft(id)
 		case msg := <-r.inbox:
 			r.handle(msg)
 		}
 	}
 }
 
-// Join registers a client and blocks until the room has processed it.
-func (r *Room) Join(c *Client) {
-	resp := make(chan struct{})
+// Join registers a client and blocks until the room has processed it, returning
+// any rejection (room full or game already started).
+func (r *Room) Join(c *Client) error {
+	resp := make(chan error, 1)
 	r.joins <- joinReq{client: c, resp: resp}
-	<-resp
+	return <-resp
 }
 
 // Leave unregisters a client.

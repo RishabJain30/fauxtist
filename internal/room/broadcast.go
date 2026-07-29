@@ -69,6 +69,9 @@ func (r *Room) broadcastEvent(ev game.Event) {
 	case game.PhaseChanged:
 		env, _ := wsproto.Encode(wsproto.TypePhaseChanged, wsproto.PhaseChangedPayload{Phase: string(e.Phase)})
 		r.broadcast(env)
+		if e.Phase == game.PhaseReveal {
+			r.broadcastReveal()
+		}
 		r.onPhaseChange(e.Phase)
 	case game.VoteRecorded:
 		env, _ := wsproto.Encode(wsproto.TypeVoteUpdate, map[string]any{
@@ -106,6 +109,46 @@ func (r *Room) onPhaseChange(p game.Phase) {
 			// the engine is only ever touched by the Run loop.
 			r.Submit(host, wsproto.Envelope{Type: wsproto.TypeEndDiscussion})
 		})
+	}
+}
+
+func (r *Room) broadcastLobby() {
+	s := r.engine.State()
+	env, err := wsproto.Encode(wsproto.TypeLobbyUpdate, map[string]any{
+		"players": s.Players,
+		"hostId":  string(s.HostID),
+	})
+	if err == nil {
+		r.broadcast(env)
+	}
+}
+
+func (r *Room) broadcastPlayerLeft(id game.PlayerID) {
+	env, err := wsproto.Encode(wsproto.TypePlayerLeft, map[string]any{"id": string(id)})
+	if err == nil {
+		r.broadcast(env)
+	}
+}
+
+// broadcastReveal tells clients who was caught when entering the reveal phase.
+// The word is withheld from the impostor, who still has to guess it.
+func (r *Room) broadcastReveal() {
+	res := r.engine.State().LastResult
+	if res == nil {
+		return
+	}
+	for id, c := range r.clients {
+		payload := map[string]any{
+			"impostorId": string(res.ImpostorID),
+			"caught":     res.Caught,
+			"tally":      res.Tally,
+		}
+		if id != res.ImpostorID {
+			payload["word"] = res.Word
+		}
+		if env, err := wsproto.Encode(wsproto.TypeRoundResult, payload); err == nil {
+			c.trySend(env)
+		}
 	}
 }
 

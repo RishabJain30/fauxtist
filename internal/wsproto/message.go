@@ -17,6 +17,7 @@ const (
 	TypeRoomState       = "room_state"
 	TypePlayerJoined    = "player_joined"
 	TypePlayerLeft      = "player_left"
+	TypeLobbyUpdate     = "lobby_update"
 	TypeRoundStarted    = "round_started"
 	TypeStrokeBroadcast = "stroke_broadcast"
 	TypeTurnChanged     = "turn_changed"
