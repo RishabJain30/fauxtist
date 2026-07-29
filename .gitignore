@@ -8,6 +8,10 @@ coverage.*
 /web/node_modules/
 /web/dist/
 
+# Embedded frontend build output (placeholder index.html is kept; Docker overwrites dist)
+/internal/webui/dist/*
+!/internal/webui/dist/index.html
+
 # Editor / OS
 .DS_Store
 .idea/

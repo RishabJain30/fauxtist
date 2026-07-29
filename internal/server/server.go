@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"net/http"
 	"strings"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/RishabJain30/fauxtist/internal/game"
 	"github.com/RishabJain30/fauxtist/internal/hub"
 	"github.com/RishabJain30/fauxtist/internal/room"
+	"github.com/RishabJain30/fauxtist/internal/webui"
 	"github.com/RishabJain30/fauxtist/internal/wsproto"
 )
 
@@ -29,6 +31,13 @@ func New(h *hub.Hub) *Server {
 	s := &Server{hub: h, mux: http.NewServeMux()}
 	s.mux.HandleFunc("POST /api/rooms", s.createRoom)
 	s.mux.HandleFunc("/ws/room/{code}", s.joinRoom)
+	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	if static, err := webui.FS(); err == nil {
+		s.mux.Handle("/", spaHandler(static))
+	}
 	return s
 }
 
@@ -110,6 +119,29 @@ func readJoin(ctx context.Context, conn *websocket.Conn, code string) (string, g
 		return p.Name, game.PlayerID(p.ReconnectToken), nil
 	}
 	return p.Name, game.PlayerID(code + "-" + p.Name), nil
+}
+
+// spaHandler serves embedded static files, falling back to index.html for
+// paths that do not map to a file (single-page app client routes).
+func spaHandler(static fs.FS) http.Handler {
+	fileServer := http.FileServer(http.FS(static))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := fs.Stat(static, trimLeadingSlash(r.URL.Path)); err != nil && r.URL.Path != "/" {
+			r = r.Clone(r.Context())
+			r.URL.Path = "/"
+		}
+		fileServer.ServeHTTP(w, r)
+	})
+}
+
+func trimLeadingSlash(p string) string {
+	if len(p) > 0 && p[0] == '/' {
+		p = p[1:]
+	}
+	if p == "" {
+		return "."
+	}
+	return p
 }
 
 // readLoop pumps inbound frames into the room until the connection closes.

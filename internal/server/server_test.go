@@ -111,6 +111,32 @@ func TestStrokeBroadcastsToAllClients(t *testing.T) {
 	t.Fatal("Bob never received chat_broadcast")
 }
 
+func TestHealthz(t *testing.T) {
+	h := hub.New()
+	srv := httptest.NewServer(New(h).Handler())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/healthz")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestServesIndexAtRoot(t *testing.T) {
+	h := hub.New()
+	srv := httptest.NewServer(New(h).Handler())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (is internal/webui/dist populated?)", resp.StatusCode)
+	}
+}
+
 func TestJoinRejectedWhenRoomFull(t *testing.T) {
 	h := hub.New()
 	srv := httptest.NewServer(New(h).Handler())
