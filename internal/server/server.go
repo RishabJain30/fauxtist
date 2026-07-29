@@ -80,7 +80,10 @@ func (s *Server) joinRoom(w http.ResponseWriter, r *http.Request) {
 	}
 
 	c := room.NewClientForServer(playerID, name, conn)
-	rm.Join(c)
+	if err := rm.Join(c); err != nil {
+		conn.Close(websocket.StatusPolicyViolation, "join rejected")
+		return
+	}
 	defer rm.Leave(playerID)
 
 	go c.WriteLoopForServer(ctx)
