@@ -1,0 +1,6 @@
+web/node_modules
+internal/webui/dist
+.git
+docs
+tasks
+*.md
