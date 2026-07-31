@@ -25,9 +25,10 @@ type joinReq struct {
 
 // Room is the actor goroutine that owns a single game.
 type Room struct {
-	Code    string
-	engine  *game.Engine
-	clients map[game.PlayerID]*Client
+	Code         string
+	engine       *game.Engine
+	clients      map[game.PlayerID]*Client
+	voicePresent map[game.PlayerID]bool
 
 	inbox  chan inbound
 	joins  chan joinReq
@@ -48,6 +49,7 @@ func NewRoom(code string, players []game.Player, host game.PlayerID, seed int64)
 		Code:          code,
 		engine:        game.NewEngine(players, host, len(players), rng, wb),
 		clients:       map[game.PlayerID]*Client{},
+		voicePresent:  map[game.PlayerID]bool{},
 		inbox:         make(chan inbound, 64),
 		joins:         make(chan joinReq, 8),
 		leaves:        make(chan game.PlayerID, 8),
@@ -76,6 +78,10 @@ func (r *Room) Run(ctx context.Context) {
 			j.resp <- nil
 		case id := <-r.leaves:
 			delete(r.clients, id)
+			if r.voicePresent[id] {
+				delete(r.voicePresent, id)
+				r.broadcastVoicePeerLeft(id)
+			}
 			r.broadcastPlayerLeft(id)
 		case msg := <-r.inbox:
 			r.handle(msg)
@@ -133,6 +139,22 @@ func (r *Room) handle(msg inbound) {
 			return
 		}
 		r.broadcastChat(msg.from, p.Text)
+	case wsproto.TypeVoiceJoin:
+		r.voiceJoin(msg.from)
+	case wsproto.TypeVoiceLeave:
+		r.voiceLeave(msg.from)
+	case wsproto.TypeVoiceSignal:
+		var p wsproto.VoiceSignalIn
+		if err := json.Unmarshal(msg.envelope.Payload, &p); err != nil {
+			return
+		}
+		r.relayVoiceSignal(msg.from, p)
+	case wsproto.TypeVoiceState:
+		var p wsproto.VoiceStateIn
+		if err := json.Unmarshal(msg.envelope.Payload, &p); err != nil {
+			return
+		}
+		r.broadcastVoiceState(msg.from, p)
 	default:
 		r.sendError(msg.from, "unknown message type")
 	}

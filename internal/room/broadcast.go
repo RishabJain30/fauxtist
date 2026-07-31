@@ -152,6 +152,63 @@ func (r *Room) broadcastReveal() {
 	}
 }
 
+// broadcastExcept sends to every connected client except one.
+func (r *Room) broadcastExcept(except game.PlayerID, env wsproto.Envelope) {
+	for id, c := range r.clients {
+		if id != except {
+			c.trySend(env)
+		}
+	}
+}
+
+func (r *Room) voiceJoin(from game.PlayerID) {
+	others := []string{}
+	for id := range r.voicePresent {
+		if id != from {
+			others = append(others, string(id))
+		}
+	}
+	r.voicePresent[from] = true
+	if env, err := wsproto.Encode(wsproto.TypeVoicePeers, map[string]any{"ids": others}); err == nil {
+		r.sendTo(from, env)
+	}
+	if env, err := wsproto.Encode(wsproto.TypeVoicePeerJoined, map[string]any{"id": string(from)}); err == nil {
+		r.broadcastExcept(from, env)
+	}
+}
+
+func (r *Room) voiceLeave(from game.PlayerID) {
+	if !r.voicePresent[from] {
+		return
+	}
+	delete(r.voicePresent, from)
+	r.broadcastVoicePeerLeft(from)
+}
+
+func (r *Room) broadcastVoicePeerLeft(id game.PlayerID) {
+	if env, err := wsproto.Encode(wsproto.TypeVoicePeerLeft, map[string]any{"id": string(id)}); err == nil {
+		r.broadcastExcept(id, env)
+	}
+}
+
+func (r *Room) relayVoiceSignal(from game.PlayerID, p wsproto.VoiceSignalIn) {
+	env, err := wsproto.Encode(wsproto.TypeVoiceSignal, map[string]any{
+		"from": string(from), "kind": p.Kind, "payload": p.Payload,
+	})
+	if err == nil {
+		r.sendTo(game.PlayerID(p.To), env)
+	}
+}
+
+func (r *Room) broadcastVoiceState(from game.PlayerID, p wsproto.VoiceStateIn) {
+	env, err := wsproto.Encode(wsproto.TypeVoiceState, map[string]any{
+		"id": string(from), "muted": p.Muted, "speaking": p.Speaking,
+	})
+	if err == nil {
+		r.broadcastExcept(from, env)
+	}
+}
+
 // stateSnapshot builds a room_state payload, hiding the word from the impostor.
 func stateSnapshot(s game.State, viewer game.PlayerID) map[string]any {
 	snap := map[string]any{
