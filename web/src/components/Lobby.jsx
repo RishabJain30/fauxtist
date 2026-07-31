@@ -18,24 +18,25 @@ export default function Lobby({ state, meId, code, onStart }) {
   }
 
   return (
-    <div className="center">
-      <div className="card col">
-        <h2>Room {code}</h2>
-        <p className="muted">Share this code or link. Need 4–8 players.</p>
-        <div className="row">
-          <button onClick={copy}>{copied ? 'Copied!' : 'Copy invite link'}</button>
-        </div>
-        <ul className="players">
-          {state.players.map((p) => (
-            <li key={p.id} className={p.id === meId ? 'me' : ''}>
-              {p.name} {p.id === state.hostId && <span className="badge">host</span>}
-            </li>
-          ))}
-        </ul>
-        {isHost
-          ? <button onClick={onStart} disabled={!enough}>{enough ? 'Start game' : 'Waiting for players…'}</button>
-          : <p className="muted">Waiting for the host to start…</p>}
+    <div className="card col">
+      <div className="label">Lobby</div>
+      <div className="row" style={{ justifyContent: 'space-between' }}>
+        <h2 style={{ margin: 0 }}>Room <span className="roomcode">{code}</span></h2>
+        <button className="btn-ghost" onClick={copy}>{copied ? '✓ Copied!' : '🔗 Copy invite link'}</button>
       </div>
+      <p className="muted">Gather 4–8 players. One of you will be faking it.</p>
+      <ul className="players">
+        {state.players.map((p) => (
+          <li key={p.id} className="player">
+            <span className="avatar" style={{ background: p.id === meId ? 'var(--amber)' : '#fff' }}>{p.emoji || '🎭'}</span>
+            <span className={p.id === meId ? 'me' : ''}>{p.name}</span>
+            {p.id === state.hostId && <span className="badge" style={{ marginLeft: 'auto' }}>👑 host</span>}
+          </li>
+        ))}
+      </ul>
+      {isHost
+        ? <button className="btn-primary" onClick={onStart} disabled={!enough}>{enough ? 'Start game →' : `Waiting for players… (${state.players.length}/4)`}</button>
+        : <p className="muted">Waiting for the host to start…</p>}
     </div>
   )
 }
