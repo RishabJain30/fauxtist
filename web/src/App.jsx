@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { parseInviteCode } from './invite.js'
 import { useRoomSocket } from './useRoomSocket.js'
 import Landing from './components/Landing.jsx'
 import Lobby from './components/Lobby.jsx'
@@ -9,8 +10,9 @@ import Reveal from './components/Reveal.jsx'
 import GameOver from './components/GameOver.jsx'
 
 export default function App() {
+  const initialCode = useMemo(() => parseInviteCode(location.pathname), [])
   const [entry, setEntry] = useState(null) // { code, join }
-  if (!entry) return <Landing onEnter={setEntry} />
+  if (!entry) return <Landing onEnter={setEntry} initialCode={initialCode} />
   return <Room entry={entry} />
 }
 
