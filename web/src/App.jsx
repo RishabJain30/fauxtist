@@ -53,7 +53,7 @@ function Room({ entry }) {
 
   return (
     <div className="center">
-      <div className="col" style={{ width: 'min(880px,94vw)' }}>
+      <div className="col" style={{ width: 'min(760px,94vw)' }}>
         <VoiceBar voice={voice} state={state} meId={meId} />
         {content}
       </div>
