@@ -20,6 +20,8 @@ export function initialState() {
     finalScores: null,
     chat: [],
     error: null,
+    voicePeers: [],
+    voiceStates: {},
   }
 }
 
@@ -74,6 +76,20 @@ export function reduce(state, msg) {
       return { ...state, chat: [...state.chat, p] }
     case T.Error:
       return { ...state, error: p.message }
+    case T.VoicePeers:
+      return { ...state, voicePeers: p.ids || [] }
+    case T.VoicePeerJoined:
+      return {
+        ...state,
+        voicePeers: state.voicePeers.includes(p.id) ? state.voicePeers : [...state.voicePeers, p.id],
+      }
+    case T.VoicePeerLeft: {
+      const voiceStates = { ...state.voiceStates }
+      delete voiceStates[p.id]
+      return { ...state, voicePeers: state.voicePeers.filter((id) => id !== p.id), voiceStates }
+    }
+    case T.VoiceState:
+      return { ...state, voiceStates: { ...state.voiceStates, [p.id]: { muted: p.muted, speaking: p.speaking } } }
     default:
       return state
   }

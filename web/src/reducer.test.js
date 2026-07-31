@@ -54,4 +54,16 @@ describe('reduce', () => {
     expect(s.chat).toHaveLength(1)
     expect(s.chat[0].text).toBe('hi')
   })
+
+  it('tracks voice peers and state', () => {
+    let s = reduce(initialState(), { type: T.VoicePeers, payload: { ids: ['a', 'b'] } })
+    expect(s.voicePeers).toEqual(['a', 'b'])
+    s = reduce(s, { type: T.VoicePeerJoined, payload: { id: 'c' } })
+    expect(s.voicePeers).toContain('c')
+    s = reduce(s, { type: T.VoiceState, payload: { id: 'c', muted: false, speaking: true } })
+    expect(s.voiceStates.c).toEqual({ muted: false, speaking: true })
+    s = reduce(s, { type: T.VoicePeerLeft, payload: { id: 'c' } })
+    expect(s.voicePeers).not.toContain('c')
+    expect(s.voiceStates.c).toBeUndefined()
+  })
 })

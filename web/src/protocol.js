@@ -20,4 +20,13 @@ export const T = {
   GameOver: 'game_over',
   ChatBroadcast: 'chat_broadcast',
   Error: 'error',
+  // voice (client -> server)
+  VoiceJoin: 'voice_join',
+  VoiceLeave: 'voice_leave',
+  VoiceSignal: 'voice_signal',
+  VoiceState: 'voice_state',
+  // voice (server -> client)
+  VoicePeers: 'voice_peers',
+  VoicePeerJoined: 'voice_peer_joined',
+  VoicePeerLeft: 'voice_peer_left',
 }
