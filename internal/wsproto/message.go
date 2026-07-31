@@ -12,6 +12,10 @@ const (
 	TypeCastVote      = "cast_vote"
 	TypeImpostorGuess = "impostor_guess"
 	TypeEndDiscussion = "end_discussion"
+	TypeVoiceJoin     = "voice_join"
+	TypeVoiceLeave    = "voice_leave"
+	TypeVoiceSignal   = "voice_signal"
+	TypeVoiceState    = "voice_state"
 
 	// Server -> client
 	TypeRoomState       = "room_state"
@@ -27,6 +31,9 @@ const (
 	TypeGameOver        = "game_over"
 	TypeChatBroadcast   = "chat_broadcast"
 	TypeError           = "error"
+	TypeVoicePeers      = "voice_peers"
+	TypeVoicePeerJoined = "voice_peer_joined"
+	TypeVoicePeerLeft   = "voice_peer_left"
 )
 
 // Envelope is the outer wire frame for every message.
@@ -88,4 +95,17 @@ type TurnChangedPayload struct {
 
 type ErrorPayload struct {
 	Message string `json:"message"`
+}
+
+// VoiceSignalIn is a client's signaling message addressed to another peer.
+type VoiceSignalIn struct {
+	To      string          `json:"to"`
+	Kind    string          `json:"kind"` // offer | answer | ice
+	Payload json.RawMessage `json:"payload"`
+}
+
+// VoiceStateIn is a client's current mic state.
+type VoiceStateIn struct {
+	Muted    bool `json:"muted"`
+	Speaking bool `json:"speaking"`
 }
