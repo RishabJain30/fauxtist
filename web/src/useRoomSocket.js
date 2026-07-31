@@ -4,6 +4,7 @@ import { reduce, initialState } from './reducer.js'
 export function useRoomSocket(code, join) {
   const [state, dispatch] = useReducer(reduce, undefined, initialState)
   const wsRef = useRef(null)
+  const subsRef = useRef(new Set())
 
   useEffect(() => {
     if (!code || !join) return
@@ -12,7 +13,10 @@ export function useRoomSocket(code, join) {
     wsRef.current = ws
     ws.onopen = () => ws.send(JSON.stringify({ type: 'join', payload: join }))
     ws.onmessage = (e) => {
-      try { dispatch(JSON.parse(e.data)) } catch { /* ignore malformed */ }
+      let msg
+      try { msg = JSON.parse(e.data) } catch { return }
+      dispatch(msg)
+      subsRef.current.forEach((fn) => fn(msg))
     }
     return () => ws.close()
   }, [code, join])
@@ -22,5 +26,10 @@ export function useRoomSocket(code, join) {
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type, payload }))
   }, [])
 
-  return { state, send }
+  const subscribe = useCallback((fn) => {
+    subsRef.current.add(fn)
+    return () => subsRef.current.delete(fn)
+  }, [])
+
+  return { state, send, subscribe }
 }
