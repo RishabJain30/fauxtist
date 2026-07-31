@@ -60,6 +60,7 @@ type Point struct {
 
 type JoinPayload struct {
 	Name           string `json:"name"`
+	Emoji          string `json:"emoji,omitempty"`
 	ReconnectToken string `json:"reconnectToken,omitempty"`
 }
 

@@ -33,6 +33,7 @@ type Stroke struct {
 type Player struct {
 	ID    PlayerID `json:"id"`
 	Name  string   `json:"name"`
+	Emoji string   `json:"emoji"`
 	Score int      `json:"score"`
 }
 

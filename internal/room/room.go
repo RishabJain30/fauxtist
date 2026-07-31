@@ -67,7 +67,7 @@ func (r *Room) Run(ctx context.Context) {
 		case <-r.done:
 			return
 		case j := <-r.joins:
-			err := r.engine.UpsertPlayer(game.Player{ID: j.client.PlayerID, Name: j.client.Name})
+			err := r.engine.UpsertPlayer(game.Player{ID: j.client.PlayerID, Name: j.client.Name, Emoji: j.client.Emoji})
 			if err != nil {
 				j.resp <- err
 				continue

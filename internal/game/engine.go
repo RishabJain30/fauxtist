@@ -80,6 +80,9 @@ func (e *Engine) UpsertPlayer(p Player) error {
 		if p.Name != "" {
 			e.state.Players[i].Name = p.Name
 		}
+		if p.Emoji != "" {
+			e.state.Players[i].Emoji = p.Emoji
+		}
 		return nil
 	}
 	if e.state.Phase != PhaseLobby {

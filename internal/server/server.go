@@ -83,13 +83,13 @@ func (s *Server) joinRoom(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	// The first frame must be a join naming the player.
-	name, playerID, err := readJoin(ctx, conn, code)
+	name, emoji, playerID, err := readJoin(ctx, conn, code)
 	if err != nil {
 		conn.Close(websocket.StatusPolicyViolation, "expected join")
 		return
 	}
 
-	c := room.NewClientForServer(playerID, name, conn)
+	c := room.NewClientForServer(playerID, name, emoji, conn)
 	if err := rm.Join(c); err != nil {
 		conn.Close(websocket.StatusPolicyViolation, "join rejected")
 		return
@@ -103,23 +103,23 @@ func (s *Server) joinRoom(w http.ResponseWriter, r *http.Request) {
 // readJoin blocks for the initial join frame and resolves the player's ID. A
 // reconnect token (issued to the host via POST, and to any client for reconnect)
 // claims that exact seat; otherwise a fresh id is minted from the room + name.
-func readJoin(ctx context.Context, conn *websocket.Conn, code string) (string, game.PlayerID, error) {
+func readJoin(ctx context.Context, conn *websocket.Conn, code string) (string, string, game.PlayerID, error) {
 	_, data, err := conn.Read(ctx)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	var env wsproto.Envelope
 	if err := json.Unmarshal(data, &env); err != nil || env.Type != wsproto.TypeJoin {
-		return "", "", errBadJoin
+		return "", "", "", errBadJoin
 	}
 	var p wsproto.JoinPayload
 	if err := json.Unmarshal(env.Payload, &p); err != nil || strings.TrimSpace(p.Name) == "" {
-		return "", "", errBadJoin
+		return "", "", "", errBadJoin
 	}
 	if p.ReconnectToken != "" {
-		return p.Name, game.PlayerID(p.ReconnectToken), nil
+		return p.Name, p.Emoji, game.PlayerID(p.ReconnectToken), nil
 	}
-	return p.Name, game.PlayerID(code + "-" + p.Name), nil
+	return p.Name, p.Emoji, game.PlayerID(code + "-" + p.Name), nil
 }
 
 // allowedOrigins restricts WebSocket upgrades to the deployed host when

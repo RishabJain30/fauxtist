@@ -14,15 +14,17 @@ import (
 type Client struct {
 	PlayerID game.PlayerID
 	Name     string
+	Emoji    string
 	conn     *websocket.Conn
 	send     chan wsproto.Envelope
 }
 
 // newClient wraps a websocket connection.
-func newClient(id game.PlayerID, name string, conn *websocket.Conn) *Client {
+func newClient(id game.PlayerID, name, emoji string, conn *websocket.Conn) *Client {
 	return &Client{
 		PlayerID: id,
 		Name:     name,
+		Emoji:    emoji,
 		conn:     conn,
 		send:     make(chan wsproto.Envelope, 32),
 	}
@@ -59,8 +61,8 @@ func (c *Client) trySend(env wsproto.Envelope) {
 }
 
 // NewClientForServer is the exported constructor used by the server package.
-func NewClientForServer(id game.PlayerID, name string, conn *websocket.Conn) *Client {
-	return newClient(id, name, conn)
+func NewClientForServer(id game.PlayerID, name, emoji string, conn *websocket.Conn) *Client {
+	return newClient(id, name, emoji, conn)
 }
 
 // WriteLoopForServer runs the client's write pump (exported for the server).
