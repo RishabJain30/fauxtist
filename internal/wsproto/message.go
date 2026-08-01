@@ -16,6 +16,7 @@ const (
 	TypeVoiceLeave    = "voice_leave"
 	TypeVoiceSignal   = "voice_signal"
 	TypeVoiceState    = "voice_state"
+	TypeNewGame       = "new_game"
 
 	// Server -> client
 	TypeRoomState       = "room_state"

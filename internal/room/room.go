@@ -141,6 +141,8 @@ func (r *Room) handle(msg inbound) {
 		r.apply(r.engine.AddStroke(msg.from, toStroke(msg.from, p)))
 	case wsproto.TypeEndDiscussion:
 		r.apply(r.engine.EndDiscussion(msg.from))
+	case wsproto.TypeNewGame:
+		r.apply(r.engine.Restart(msg.from))
 	case wsproto.TypeCastVote:
 		var p wsproto.VotePayload
 		if err := json.Unmarshal(msg.envelope.Payload, &p); err != nil {

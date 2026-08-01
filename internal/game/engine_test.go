@@ -375,6 +375,62 @@ func TestStartGameScalesRoundsToPlayers(t *testing.T) {
 	}
 }
 
+func playToGameOver(t *testing.T, n int) *Engine {
+	t.Helper()
+	e := newTestEngine(t, n)
+	if _, err := e.StartGame(PlayerID("a")); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	for r := 0; r < n; r++ {
+		for i := 0; i < n*e.state.TotalLaps; i++ {
+			d := currentDrawer(e)
+			_, _ = e.AddStroke(d, Stroke{By: d})
+		}
+		_, _ = e.EndDiscussion(PlayerID("a"))
+		imp := e.State().ImpostorID
+		others := nonImpostors(e)
+		_, _ = e.CastVote(others[0], others[1])
+		_, _ = e.CastVote(others[1], others[2])
+		_, _ = e.CastVote(others[2], others[0])
+		_, _ = e.CastVote(imp, others[0])
+		e.AdvanceRound()
+	}
+	return e
+}
+
+func TestRestartStartsFreshGame(t *testing.T) {
+	e := playToGameOver(t, 4)
+	if e.State().Phase != PhaseGameOver {
+		t.Fatalf("precondition: phase = %q, want game_over", e.State().Phase)
+	}
+	if _, err := e.Restart(PlayerID("a")); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	s := e.State()
+	if s.Phase != PhaseDrawing {
+		t.Fatalf("phase = %q, want drawing", s.Phase)
+	}
+	if s.Round != 1 {
+		t.Fatalf("round = %d, want 1", s.Round)
+	}
+	for _, p := range s.Players {
+		if p.Score != 0 {
+			t.Fatalf("score not reset: %s = %d", p.ID, p.Score)
+		}
+	}
+}
+
+func TestRestartRejectsNonHostAndWrongPhase(t *testing.T) {
+	e := playToGameOver(t, 4)
+	if _, err := e.Restart(PlayerID("b")); err != ErrNotHost {
+		t.Fatalf("err = %v, want ErrNotHost", err)
+	}
+	e2 := startedEngine(t, 4) // still drawing
+	if _, err := e2.Restart(PlayerID("a")); err != ErrWrongPhase {
+		t.Fatalf("err = %v, want ErrWrongPhase", err)
+	}
+}
+
 func TestNotCaughtHoldsOnRevealUntilAdvance(t *testing.T) {
 	e := votingEngine(t, 4)
 	imp := e.State().ImpostorID

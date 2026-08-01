@@ -25,6 +25,7 @@ export const T = {
   VoiceLeave: 'voice_leave',
   VoiceSignal: 'voice_signal',
   VoiceState: 'voice_state',
+  NewGame: 'new_game',
   // voice (server -> client)
   VoicePeers: 'voice_peers',
   VoicePeerJoined: 'voice_peer_joined',

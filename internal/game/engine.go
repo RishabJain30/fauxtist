@@ -272,6 +272,28 @@ func (e *Engine) finalizeRound() []Event {
 	return []Event{RoundEnded{Result: *e.state.LastResult}}
 }
 
+// Restart begins a fresh game from the game-over screen: resets scores and word
+// history, keeps the same players, and starts round 1. Host-only.
+func (e *Engine) Restart(by PlayerID) ([]Event, error) {
+	if e.state.Phase != PhaseGameOver {
+		return nil, ErrWrongPhase
+	}
+	if by != e.state.HostID {
+		return nil, ErrNotHost
+	}
+	if len(e.state.Players) < MinPlayers {
+		return nil, ErrTooFewPlayers
+	}
+	for i := range e.state.Players {
+		e.state.Players[i].Score = 0
+	}
+	e.state.UsedWords = map[string]bool{}
+	e.state.LastResult = nil
+	e.state.TotalRounds = len(e.state.Players)
+	e.impostorOrder = e.rng.Perm(len(e.state.Players))
+	return e.beginRound(1)
+}
+
 // AdvanceRound leaves the reveal phase for the next round, or ends the game
 // after the final round. Called by the room once the reveal hold elapses.
 func (e *Engine) AdvanceRound() []Event {

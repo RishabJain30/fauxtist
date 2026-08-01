@@ -36,7 +36,7 @@ function Room({ entry }) {
   if (state.phase === 'lobby') {
     content = <Lobby state={state} meId={meId} code={entry.code} onStart={() => send('start_game')} />
   } else if (state.phase === 'game_over') {
-    content = <GameOver state={state} />
+    content = <GameOver state={state} meId={meId} send={send} />
   } else {
     content = (
       <>
