@@ -43,39 +43,13 @@ func writeMsg(t *testing.T, c *websocket.Conn, typ string, payload any) {
 	}
 }
 
-// TestFullGameReachesGameOver drives a complete 4-player game over real
-// WebSockets and asserts it advances through every phase to a final scoreboard.
-// The test reads only the host's stream for broadcast control events and writes
-// actions (strokes/votes/guess) to whichever client is required to act.
-func TestFullGameReachesGameOver(t *testing.T) {
-	t.Setenv("FAUXTIST_REVEAL_MS", "30") // keep the between-rounds reveal hold short
-	h := hub.New()
-	srv := httptest.NewServer(New(h).Handler())
-	defer srv.Close()
-
-	resp, _ := http.Post(srv.URL+"/api/rooms", "application/json", strings.NewReader(`{"name":"Host"}`))
-	var cr createRoomResp
-	_ = json.NewDecoder(resp.Body).Decode(&cr)
-	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/room/" + cr.Code
-
-	hostID := cr.HostToken
-	names := []string{"N1", "N2", "N3"}
-	conns := map[string]*websocket.Conn{}
-
-	host := dialJoin(t, wsURL, wsproto.JoinPayload{Name: "Host", ReconnectToken: cr.HostToken})
-	defer host.Close(websocket.StatusNormalClosure, "")
-	conns[hostID] = host
-	for _, n := range names {
-		c := dialJoin(t, wsURL, wsproto.JoinPayload{Name: n})
-		defer c.Close(websocket.StatusNormalClosure, "")
-		conns[cr.Code+"-"+n] = c
-	}
-	voteTarget := cr.Code + "-N1"
-
-	// Give the room a beat to register all four players before starting.
-	time.Sleep(150 * time.Millisecond)
-	writeMsg(t, host, wsproto.TypeStartGame, map[string]any{})
-
+// driveGameToGameOver reads the host's stream and drives one full game to the
+// game-over scoreboard: it makes the current drawer stroke, ends discussion,
+// votes (everyone at voteTarget), lets a caught impostor guess, and rides the
+// reveal holds. It asserts every meaningful phase was observed, then returns the
+// final scores. Assumes a game is starting (round 1 about to begin).
+func driveGameToGameOver(t *testing.T, host *websocket.Conn, conns map[string]*websocket.Conn, voteTarget string) []any {
+	t.Helper()
 	readHost := func() (wsproto.Envelope, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -132,19 +106,80 @@ func TestFullGameReachesGameOver(t *testing.T) {
 			}
 		case wsproto.TypeGameOver:
 			scores, _ := p["finalScores"].([]any)
-			if len(scores) != 4 {
-				t.Fatalf("finalScores len = %d, want 4", len(scores))
-			}
-			// Confirm we passed through every meaningful phase.
 			for _, want := range []string{wsproto.TypeRoundStarted, wsproto.TypeTurnChanged, wsproto.TypeStrokeBroadcast, wsproto.TypeVoteUpdate, wsproto.TypeRoundResult} {
 				if !saw[want] {
 					t.Fatalf("never observed %q during the game", want)
 				}
 			}
-			return
+			return scores
 		}
 	}
 	t.Fatalf("game did not reach game_over within message cap (saw: %+v)", saw)
+	return nil
+}
+
+// setupGame creates a room and connects the host (by token) plus three named
+// players, returning the host conn, the id->conn map, and a vote target.
+func setupGame(t *testing.T, srv *httptest.Server) (*websocket.Conn, map[string]*websocket.Conn, string) {
+	t.Helper()
+	resp, _ := http.Post(srv.URL+"/api/rooms", "application/json", strings.NewReader(`{"name":"Host"}`))
+	var cr createRoomResp
+	_ = json.NewDecoder(resp.Body).Decode(&cr)
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/room/" + cr.Code
+
+	conns := map[string]*websocket.Conn{}
+	host := dialJoin(t, wsURL, wsproto.JoinPayload{Name: "Host", Emoji: "🦊", ReconnectToken: cr.HostToken})
+	conns[cr.HostToken] = host
+	for _, n := range []string{"N1", "N2", "N3"} {
+		c := dialJoin(t, wsURL, wsproto.JoinPayload{Name: n, Emoji: "🐙"})
+		conns[cr.Code+"-"+n] = c
+	}
+	time.Sleep(150 * time.Millisecond) // let all four register
+	return host, conns, cr.Code + "-N1"
+}
+
+func TestFullGameReachesGameOver(t *testing.T) {
+	t.Setenv("FAUXTIST_REVEAL_MS", "30")
+	srv := httptest.NewServer(New(hub.New()).Handler())
+	defer srv.Close()
+
+	host, conns, voteTarget := setupGame(t, srv)
+	defer func() {
+		for _, c := range conns {
+			c.Close(websocket.StatusNormalClosure, "")
+		}
+	}()
+
+	writeMsg(t, host, wsproto.TypeStartGame, map[string]any{})
+	scores := driveGameToGameOver(t, host, conns, voteTarget)
+	if len(scores) != 4 {
+		t.Fatalf("finalScores len = %d, want 4", len(scores))
+	}
+}
+
+func TestNewGameRematch(t *testing.T) {
+	t.Setenv("FAUXTIST_REVEAL_MS", "30")
+	srv := httptest.NewServer(New(hub.New()).Handler())
+	defer srv.Close()
+
+	host, conns, voteTarget := setupGame(t, srv)
+	defer func() {
+		for _, c := range conns {
+			c.Close(websocket.StatusNormalClosure, "")
+		}
+	}()
+
+	// First game.
+	writeMsg(t, host, wsproto.TypeStartGame, map[string]any{})
+	if s := driveGameToGameOver(t, host, conns, voteTarget); len(s) != 4 {
+		t.Fatalf("game 1 finalScores len = %d, want 4", len(s))
+	}
+
+	// Host starts a rematch; a whole second game must play through to game over.
+	writeMsg(t, host, wsproto.TypeNewGame, map[string]any{})
+	if s := driveGameToGameOver(t, host, conns, voteTarget); len(s) != 4 {
+		t.Fatalf("rematch finalScores len = %d, want 4", len(s))
+	}
 }
 
 func numField(m map[string]any, k string) float64 {
