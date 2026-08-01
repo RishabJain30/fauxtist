@@ -240,14 +240,16 @@ func (e *Engine) finishVoting() []Event {
 		Tally:      t,
 		ScoreDelta: map[PlayerID]int{},
 	}
+	e.state.Phase = PhaseReveal
 	if caught {
-		// Impostor gets a chance to steal the win by guessing the word.
-		e.state.Phase = PhaseReveal
+		// Impostor gets a chance to steal the win by guessing the word; the
+		// round is not final yet, so no RoundEnded until the guess.
 		return []Event{PhaseChanged{Phase: PhaseReveal}}
 	}
-	// Impostor evaded detection: +2 and advance.
+	// Impostor evaded detection: +2. Result is final; hold on the reveal phase
+	// until the room advances the round.
 	e.applyScore(e.state.ImpostorID, 2)
-	return e.endRound()
+	return append([]Event{PhaseChanged{Phase: PhaseReveal}}, e.finalizeRound()...)
 }
 
 // applyScore adds delta to a player's score and records it in the round result.
@@ -262,20 +264,31 @@ func (e *Engine) applyScore(id PlayerID, delta int) {
 	}
 }
 
-// endRound emits RoundEnded and either starts the next round or ends the game.
-func (e *Engine) endRound() []Event {
-	events := []Event{RoundEnded{Result: *e.state.LastResult}}
+// finalizeRound marks the round result final and holds on the reveal phase.
+// The room advances to the next round (or ends the game) via AdvanceRound after
+// a short reveal hold, so players can actually read the result.
+func (e *Engine) finalizeRound() []Event {
+	e.state.Phase = PhaseReveal
+	return []Event{RoundEnded{Result: *e.state.LastResult}}
+}
+
+// AdvanceRound leaves the reveal phase for the next round, or ends the game
+// after the final round. Called by the room once the reveal hold elapses.
+func (e *Engine) AdvanceRound() []Event {
+	if e.state.Phase != PhaseReveal {
+		return nil
+	}
 	if e.state.Round >= e.state.TotalRounds {
 		e.state.Phase = PhaseGameOver
-		return append(events, GameEnded{FinalScores: append([]Player(nil), e.state.Players...)})
+		return []Event{GameEnded{FinalScores: append([]Player(nil), e.state.Players...)}}
 	}
 	next, err := e.beginRound(e.state.Round + 1)
 	if err != nil {
 		// Should not happen with a healthy word source; end the game defensively.
 		e.state.Phase = PhaseGameOver
-		return append(events, GameEnded{FinalScores: append([]Player(nil), e.state.Players...)})
+		return []Event{GameEnded{FinalScores: append([]Player(nil), e.state.Players...)}}
 	}
-	return append(events, next...)
+	return next
 }
 
 // ImpostorGuess resolves the reveal phase after the impostor was caught. A
@@ -301,5 +314,5 @@ func (e *Engine) ImpostorGuess(by PlayerID, guess string) ([]Event, error) {
 			}
 		}
 	}
-	return e.endRound(), nil
+	return e.finalizeRound(), nil
 }

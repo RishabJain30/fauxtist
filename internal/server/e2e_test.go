@@ -48,6 +48,7 @@ func writeMsg(t *testing.T, c *websocket.Conn, typ string, payload any) {
 // The test reads only the host's stream for broadcast control events and writes
 // actions (strokes/votes/guess) to whichever client is required to act.
 func TestFullGameReachesGameOver(t *testing.T) {
+	t.Setenv("FAUXTIST_REVEAL_MS", "30") // keep the between-rounds reveal hold short
 	h := hub.New()
 	srv := httptest.NewServer(New(h).Handler())
 	defer srv.Close()

@@ -375,6 +375,27 @@ func TestStartGameScalesRoundsToPlayers(t *testing.T) {
 	}
 }
 
+func TestNotCaughtHoldsOnRevealUntilAdvance(t *testing.T) {
+	e := votingEngine(t, 4)
+	imp := e.State().ImpostorID
+	others := nonImpostors(e)
+	_, _ = e.CastVote(others[0], others[1])
+	_, _ = e.CastVote(others[1], others[2])
+	_, _ = e.CastVote(others[2], others[0])
+	_, _ = e.CastVote(imp, others[0]) // not caught
+
+	if e.State().Phase != PhaseReveal {
+		t.Fatalf("phase = %q, want reveal (should hold, not auto-advance)", e.State().Phase)
+	}
+	e.AdvanceRound()
+	if e.State().Phase != PhaseDrawing {
+		t.Fatalf("after AdvanceRound phase = %q, want drawing", e.State().Phase)
+	}
+	if e.State().Round != 2 {
+		t.Fatalf("round = %d, want 2", e.State().Round)
+	}
+}
+
 func TestGameEndsAfterFinalRound(t *testing.T) {
 	// totalRounds defaults to len(players); play all rounds and expect game over.
 	e := newTestEngine(t, 4)
@@ -395,6 +416,8 @@ func TestGameEndsAfterFinalRound(t *testing.T) {
 		_, _ = e.CastVote(others[1], others[2])
 		_, _ = e.CastVote(others[2], others[0])
 		_, _ = e.CastVote(imp, others[0])
+		// Round holds on reveal; advance to the next round (or game over).
+		e.AdvanceRound()
 	}
 	if e.State().Phase != PhaseGameOver {
 		t.Fatalf("phase = %q, want game_over", e.State().Phase)

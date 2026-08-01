@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"math/rand"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/RishabJain30/fauxtist/internal/game"
@@ -30,13 +32,16 @@ type Room struct {
 	clients      map[game.PlayerID]*Client
 	voicePresent map[game.PlayerID]bool
 
-	inbox  chan inbound
-	joins  chan joinReq
-	leaves chan game.PlayerID
-	done   chan struct{}
+	inbox   chan inbound
+	joins   chan joinReq
+	leaves  chan game.PlayerID
+	advance chan struct{}
+	done    chan struct{}
 
 	discussionTimer *time.Timer
 	discussionDur   time.Duration
+	revealTimer     *time.Timer
+	revealDur       time.Duration
 }
 
 // NewRoom builds a lobby-phase room. Players are added as they join (Task 12
@@ -53,9 +58,22 @@ func NewRoom(code string, players []game.Player, host game.PlayerID, seed int64)
 		inbox:         make(chan inbound, 64),
 		joins:         make(chan joinReq, 8),
 		leaves:        make(chan game.PlayerID, 8),
+		advance:       make(chan struct{}, 1),
 		done:          make(chan struct{}),
 		discussionDur: 45 * time.Second,
+		revealDur:     revealDuration(),
 	}
+}
+
+// revealDuration is how long the round result is shown before advancing. Env
+// FAUXTIST_REVEAL_MS overrides it (used to keep integration tests fast).
+func revealDuration() time.Duration {
+	if ms := os.Getenv("FAUXTIST_REVEAL_MS"); ms != "" {
+		if n, err := strconv.Atoi(ms); err == nil {
+			return time.Duration(n) * time.Millisecond
+		}
+	}
+	return 6 * time.Second
 }
 
 // Run is the single-goroutine event loop. Nothing else mutates the engine.
@@ -76,6 +94,10 @@ func (r *Room) Run(ctx context.Context) {
 			r.sendSnapshot(j.client)
 			r.broadcastLobby()
 			j.resp <- nil
+		case <-r.advance:
+			for _, ev := range r.engine.AdvanceRound() {
+				r.broadcastEvent(ev)
+			}
 		case id := <-r.leaves:
 			delete(r.clients, id)
 			if r.voicePresent[id] {

@@ -81,6 +81,7 @@ func (r *Room) broadcastEvent(ev game.Event) {
 	case game.RoundEnded:
 		env, _ := wsproto.Encode(wsproto.TypeRoundResult, e.Result)
 		r.broadcast(env)
+		r.startRevealTimer()
 	case game.GameEnded:
 		env, _ := wsproto.Encode(wsproto.TypeGameOver, map[string]any{"finalScores": e.FinalScores})
 		r.broadcast(env)
@@ -94,6 +95,21 @@ func (r *Room) broadcastChat(from game.PlayerID, text string) {
 	if err == nil {
 		r.broadcast(env)
 	}
+}
+
+// startRevealTimer holds on the reveal phase, then signals the room to advance
+// to the next round. Timer fires on its own goroutine and routes through the
+// advance channel so the engine is only touched by the Run loop.
+func (r *Room) startRevealTimer() {
+	if r.revealTimer != nil {
+		r.revealTimer.Stop()
+	}
+	r.revealTimer = time.AfterFunc(r.revealDur, func() {
+		select {
+		case r.advance <- struct{}{}:
+		default:
+		}
+	})
 }
 
 // onPhaseChange starts/stops the discussion timer.
