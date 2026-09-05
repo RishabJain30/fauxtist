@@ -1,7 +1,7 @@
 import { useEffect } from 'react'
 import confetti from 'canvas-confetti'
 
-export default function GameOver({ state, meId, send, onLeave }) {
+export default function GameOver({ state, meId, send, onLeave, disabled }) {
   const isHost = state.hostId === meId
   const scores = [...(state.finalScores || [])].sort((a, b) => b.score - a.score)
   const top = scores.length ? scores[0].score : 0
@@ -32,7 +32,7 @@ export default function GameOver({ state, meId, send, onLeave }) {
         ))}
       </ol>
       {isHost
-        ? <button className="btn-primary" onClick={() => send('new_game')}>🔄 Start a new game</button>
+        ? <button className="btn-primary" onClick={() => send('new_game')} disabled={disabled}>🔄 Start a new game</button>
         : <p className="muted">Waiting for the host to start a new game…</p>}
       <button className="btn-ghost" onClick={onLeave}>Leave</button>
     </div>

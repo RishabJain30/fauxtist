@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { parseInviteCode } from './invite.js'
-import { loadCredentials, saveCredentials, clearCredentials } from './credentials.js'
+import { loadCredentials, clearCredentials } from './credentials.js'
 import { useRoomSocket } from './useRoomSocket.js'
 import { useVoice } from './useVoice.js'
 import Landing from './components/Landing.jsx'
@@ -38,18 +38,16 @@ export default function App() {
   return <Room entry={entry} onLeave={leave} />
 }
 
+// Statuses where the room screen (last known snapshot) still renders, just
+// with a small overlay banner and gameplay disabled — as opposed to
+// 'connecting' on a session that has never yet reached a snapshot, or
+// 'failed', which have nothing else worth showing behind them.
+const TEMPORARY_STATUSES = new Set(['reconnecting', 'resyncing'])
+
 function Room({ entry, onLeave }) {
   const join = useMemo(() => entry.join, [entry])
-  const { state, send, subscribe, identity } = useRoomSocket(entry.code, join)
+  const { state, send, subscribe, identity, connectionStatus } = useRoomSocket(entry.code, join)
   const meId = identity?.playerId ?? entry.join.playerId ?? null
-
-  useEffect(() => {
-    if (identity) saveCredentials(entry.code, identity.playerId, identity.reconnectToken)
-  }, [entry.code, identity])
-
-  useEffect(() => {
-    if (state.phase === 'join_failed') clearCredentials(entry.code)
-  }, [state.phase, entry.code])
 
   const leaveRoom = useCallback(() => {
     clearCredentials(entry.code)
@@ -71,23 +69,34 @@ function Room({ entry, onLeave }) {
       </div>
     )
   }
+  if (connectionStatus === 'failed') {
+    return (
+      <div className="center">
+        <div className="card col">
+          <p>Lost the connection to this room and couldn't reconnect.</p>
+          <button className="btn-primary" onClick={leaveRoom}>Back to start</button>
+        </div>
+      </div>
+    )
+  }
 
   const isHost = state.hostId === meId
+  const disabled = connectionStatus !== 'connected'
   let content
   if (state.phase === 'lobby') {
-    content = <Lobby state={state} meId={meId} code={entry.code} onStart={() => send('start_game')} />
+    content = <Lobby state={state} meId={meId} code={entry.code} onStart={() => send('start_game')} disabled={disabled} />
   } else if (state.phase === 'game_over') {
-    content = <GameOver state={state} meId={meId} send={send} onLeave={leaveRoom} />
+    content = <GameOver state={state} meId={meId} send={send} onLeave={leaveRoom} disabled={disabled} />
   } else {
     content = (
       <>
         {state.error && <div className="card" style={{ color: '#ff6b6b' }}>{state.error}</div>}
-        {state.phase === 'drawing' && <GameBoard state={state} meId={meId} send={send} />}
+        {state.phase === 'drawing' && <GameBoard state={state} meId={meId} send={send} disabled={disabled} />}
         {state.phase === 'discussion' && (
-          <Chat state={state} meId={meId} send={send} canEndDiscussion={isHost} onEnd={() => send('end_discussion')} />
+          <Chat state={state} meId={meId} send={send} canEndDiscussion={isHost} onEnd={() => send('end_discussion')} disabled={disabled} />
         )}
-        {state.phase === 'voting' && <Voting state={state} meId={meId} send={send} />}
-        {state.phase === 'reveal' && <Reveal state={state} meId={meId} send={send} />}
+        {state.phase === 'voting' && <Voting state={state} meId={meId} send={send} disabled={disabled} />}
+        {state.phase === 'reveal' && <Reveal state={state} meId={meId} send={send} disabled={disabled} />}
       </>
     )
   }
@@ -95,6 +104,11 @@ function Room({ entry, onLeave }) {
   return (
     <div className="center">
       <div className="col" style={{ width: 'min(760px,94vw)' }}>
+        {TEMPORARY_STATUSES.has(connectionStatus) && (
+          <div className="card" style={{ textAlign: 'center', padding: 10 }}>
+            {connectionStatus === 'resyncing' ? 'Syncing…' : 'Reconnecting…'}
+          </div>
+        )}
         <VoiceBar voice={voice} state={state} meId={meId} />
         {content}
       </div>

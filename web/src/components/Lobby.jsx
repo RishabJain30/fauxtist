@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { inviteURL } from '../invite.js'
 
-export default function Lobby({ state, meId, code, onStart }) {
+export default function Lobby({ state, meId, code, onStart, disabled }) {
   const isHost = state.hostId === meId
   const enough = state.players.length >= 4
   const [copied, setCopied] = useState(false)
@@ -36,7 +36,7 @@ export default function Lobby({ state, meId, code, onStart }) {
         ))}
       </ul>
       {isHost
-        ? <button className="btn-primary" onClick={onStart} disabled={!enough}>{enough ? 'Start game →' : `Waiting for players… (${state.players.length}/4)`}</button>
+        ? <button className="btn-primary" onClick={onStart} disabled={!enough || disabled}>{enough ? 'Start game →' : `Waiting for players… (${state.players.length}/4)`}</button>
         : <p className="muted">Waiting for the host to start…</p>}
     </div>
   )

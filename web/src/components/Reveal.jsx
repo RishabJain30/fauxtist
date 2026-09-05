@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 
-export default function Reveal({ state, meId, send }) {
+export default function Reveal({ state, meId, send, disabled }) {
   const [guess, setGuess] = useState('')
   const r = state.lastResult || {}
   const impostor = state.players.find((p) => p.id === r.impostorId)
@@ -27,8 +27,8 @@ export default function Reveal({ state, meId, send }) {
             {secondsLeft != null && <>: <b>{secondsLeft}s</b> left</>}
           </p>
           <div className="row">
-            <input value={guess} onChange={(e) => setGuess(e.target.value)} placeholder="The secret word" />
-            <button type="submit">Guess</button>
+            <input value={guess} onChange={(e) => setGuess(e.target.value)} placeholder="The secret word" disabled={disabled} />
+            <button type="submit" disabled={disabled}>Guess</button>
           </div>
         </form>
       )}
