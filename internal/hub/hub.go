@@ -59,7 +59,7 @@ func (h *Hub) CreateRoom(hostName string) (code string, hostID game.PlayerID, ho
 	h.seq++
 	seed := time.Now().UnixNano() + h.seq
 	host := game.Player{ID: game.PlayerID(playerID), Name: hostName}
-	r := room.NewRoom(code, host, identity.Hash(token), seed)
+	r := room.NewRoom(code, host, identity.Hash(token), seed, room.DefaultDurations())
 	ctx, cancel := context.WithCancel(context.Background())
 	go r.Run(ctx)
 	h.rooms[code] = &entry{room: r, cancel: cancel, seed: seed}
