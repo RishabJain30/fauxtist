@@ -44,6 +44,7 @@ type RoundResult struct {
 	Caught               bool             `json:"caught"`
 	ImpostorGuess        string           `json:"impostorGuess"`
 	ImpostorGuessedRight bool             `json:"impostorGuessedRight"`
+	ImpostorTimedOut     bool             `json:"impostorTimedOut"`
 	Tally                map[PlayerID]int `json:"tally"`
 	ScoreDelta           map[PlayerID]int `json:"scoreDelta"`
 }

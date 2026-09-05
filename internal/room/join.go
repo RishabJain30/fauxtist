@@ -99,6 +99,7 @@ func (r *Room) processJoin(j joinReq) {
 		old.closeReplaced()
 	}
 	r.clients[player.ID] = c
+	r.markConnected(player.ID)
 
 	if isNew {
 		r.sendJoinAccepted(c, token)
@@ -193,7 +194,9 @@ type leaveReq struct {
 // processLeave runs on the Run goroutine. A disconnect only removes a client
 // if its connID still matches the currently registered connection for that
 // seat; a stale connection replaced by a reconnect must not evict the seat's
-// new, live connection.
+// new, live connection. This never removes the player from the game roster
+// — that only ever happens via presence's reconnect-grace expiry (in the
+// lobby) or the phase-specific disconnect rules (in an active game).
 func (r *Room) processLeave(lv leaveReq) {
 	c, ok := r.clients[lv.playerID]
 	if !ok || c.ConnID != lv.connID {
@@ -204,5 +207,5 @@ func (r *Room) processLeave(lv leaveReq) {
 		delete(r.voicePresent, lv.playerID)
 		r.broadcastVoicePeerLeft(lv.playerID)
 	}
-	r.broadcastPlayerLeft(lv.playerID)
+	r.markDisconnected(lv.playerID)
 }

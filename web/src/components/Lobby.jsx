@@ -27,9 +27,10 @@ export default function Lobby({ state, meId, code, onStart }) {
       <p className="muted">Gather 4–8 players. One of you will be faking it.</p>
       <ul className="players">
         {state.players.map((p) => (
-          <li key={p.id} className="player">
+          <li key={p.id} className="player" style={{ opacity: p.connected === false ? 0.5 : 1 }}>
             <span className="avatar" style={{ background: p.id === meId ? 'var(--amber)' : '#fff' }}>{p.emoji || '🎭'}</span>
             <span className={p.id === meId ? 'me' : ''}>{p.name}</span>
+            {p.connected === false && <span className="muted">reconnecting…</span>}
             {p.id === state.hostId && <span className="badge" style={{ marginLeft: 'auto' }}>👑 host</span>}
           </li>
         ))}

@@ -51,8 +51,15 @@ func dialTestConn(t *testing.T) (client, server *websocket.Conn) {
 
 // newTestRoom builds a room with a freshly minted host seat, without
 // starting its Run loop (so callers may inspect unexported state race-free
-// before any goroutine touches it).
+// before any goroutine touches it). Uses generous (effectively "never
+// fires during this test") durations; use newTestRoomWithDurations for
+// tests that specifically exercise grace/skip/guess timers.
 func newTestRoom(t *testing.T, hostName string) (r *Room, hostID game.PlayerID, hostToken string) {
+	t.Helper()
+	return newTestRoomWithDurations(t, hostName, longTestDurations())
+}
+
+func newTestRoomWithDurations(t *testing.T, hostName string, durations Durations) (r *Room, hostID game.PlayerID, hostToken string) {
 	t.Helper()
 	pid, err := identity.NewPlayerID()
 	if err != nil {
@@ -63,8 +70,20 @@ func newTestRoom(t *testing.T, hostName string) (r *Room, hostID game.PlayerID, 
 		t.Fatalf("NewReconnectToken: %v", err)
 	}
 	host := game.Player{ID: game.PlayerID(pid), Name: hostName}
-	r = NewRoom("TEST", host, identity.Hash(tok), 1)
+	r = NewRoom("TEST", host, identity.Hash(tok), 1, durations)
 	return r, host.ID, tok
+}
+
+// longTestDurations returns durations long enough that no timer fires
+// during a normal test run, for tests that don't care about timing.
+func longTestDurations() Durations {
+	return Durations{
+		Discussion:       time.Hour,
+		Reveal:           time.Hour,
+		Reconnect:        time.Hour,
+		DisconnectedTurn: time.Hour,
+		ImpostorGuess:    time.Hour,
+	}
 }
 
 func startTestRoom(t *testing.T, r *Room) {

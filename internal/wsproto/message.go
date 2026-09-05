@@ -19,11 +19,13 @@ const (
 	TypeNewGame       = "new_game"
 
 	// Server -> client
-	TypeRoomState       = "room_state"
-	TypeJoinAccepted    = "join_accepted"
-	TypePlayerJoined    = "player_joined"
-	TypePlayerLeft      = "player_left"
-	TypeLobbyUpdate     = "lobby_update"
+	TypeRoomState             = "room_state"
+	TypeJoinAccepted          = "join_accepted"
+	TypePlayerJoined          = "player_joined"
+	TypePlayerLeft            = "player_left"
+	TypePlayerPresenceChanged = "player_presence_changed"
+	TypeHostChanged           = "host_changed"
+	TypeLobbyUpdate           = "lobby_update"
 	TypeRoundStarted    = "round_started"
 	TypeStrokeBroadcast = "stroke_broadcast"
 	TypeTurnChanged     = "turn_changed"
@@ -109,6 +111,30 @@ type ErrorPayload struct {
 type JoinAcceptedPayload struct {
 	PlayerID       string `json:"playerId"`
 	ReconnectToken string `json:"reconnectToken"`
+}
+
+// PlayerView is a player as seen by clients: the engine's authoritative
+// fields plus room-tracked connection presence, which the engine itself has
+// no notion of. Never carries a reconnect token, token hash, or connection
+// id — those never leave the room's own memory.
+type PlayerView struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Emoji     string `json:"emoji"`
+	Score     int    `json:"score"`
+	Connected bool   `json:"connected"`
+}
+
+// PlayerPresenceChangedPayload announces that one player's connection
+// status flipped, without implying they were removed from the roster.
+type PlayerPresenceChangedPayload struct {
+	ID        string `json:"id"`
+	Connected bool   `json:"connected"`
+}
+
+// HostChangedPayload announces deterministic host migration.
+type HostChangedPayload struct {
+	HostID string `json:"hostId"`
 }
 
 // VoiceSignalIn is a client's signaling message addressed to another peer.

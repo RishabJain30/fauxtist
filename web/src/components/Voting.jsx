@@ -22,10 +22,12 @@ export default function Voting({ state, meId, send }) {
                 justifyContent: 'flex-start',
                 background: picked ? 'var(--amber)' : '#fff',
                 color: 'var(--ink)', fontSize: 18,
+                opacity: p.connected === false ? 0.5 : 1,
               }}
             >
               <span className="avatar">{p.emoji || '🎭'}</span>
               {p.name}{isMe ? ' (you)' : ''}{picked ? ' ✓' : ''}
+              {p.connected === false && <span className="muted"> (reconnecting…)</span>}
             </button>
           )
         })}

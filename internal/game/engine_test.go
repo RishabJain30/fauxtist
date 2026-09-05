@@ -213,7 +213,7 @@ func TestVotingCaughtGoesToReveal(t *testing.T) {
 	imp := e.State().ImpostorID
 	// Everyone (including impostor) votes for the impostor -> plurality -> caught.
 	for _, p := range e.state.Players {
-		if _, err := e.CastVote(p.ID, imp); err != nil {
+		if _, err := e.CastVote(p.ID, imp, nil); err != nil {
 			t.Fatalf("vote by %s: %v", p.ID, err)
 		}
 	}
@@ -231,10 +231,10 @@ func TestVotingNotCaughtImpostorScores(t *testing.T) {
 	others := nonImpostors(e)
 	// Each non-impostor votes for a different non-impostor; impostor votes too.
 	// Result: impostor receives zero votes -> not caught.
-	_, _ = e.CastVote(others[0], others[1])
-	_, _ = e.CastVote(others[1], others[2])
-	_, _ = e.CastVote(others[2], others[0])
-	_, err := e.CastVote(imp, others[0])
+	_, _ = e.CastVote(others[0], others[1], nil)
+	_, _ = e.CastVote(others[1], others[2], nil)
+	_, _ = e.CastVote(others[2], others[0], nil)
+	_, err := e.CastVote(imp, others[0], nil)
 	if err != nil {
 		t.Fatalf("impostor vote: %v", err)
 	}
@@ -260,10 +260,10 @@ func TestDoubleVoteRejected(t *testing.T) {
 	e := votingEngine(t, 4)
 	voter := e.state.Players[0].ID
 	target := e.state.Players[1].ID
-	if _, err := e.CastVote(voter, target); err != nil {
+	if _, err := e.CastVote(voter, target, nil); err != nil {
 		t.Fatalf("first vote: %v", err)
 	}
-	if _, err := e.CastVote(voter, target); err != ErrAlreadyVoted {
+	if _, err := e.CastVote(voter, target, nil); err != ErrAlreadyVoted {
 		t.Fatalf("err = %v, want ErrAlreadyVoted", err)
 	}
 }
@@ -273,7 +273,7 @@ func caughtEngine(t *testing.T, n int) *Engine {
 	e := votingEngine(t, n)
 	imp := e.State().ImpostorID
 	for _, p := range e.state.Players {
-		if _, err := e.CastVote(p.ID, imp); err != nil {
+		if _, err := e.CastVote(p.ID, imp, nil); err != nil {
 			t.Fatalf("vote: %v", err)
 		}
 	}
@@ -389,10 +389,10 @@ func playToGameOver(t *testing.T, n int) *Engine {
 		_, _ = e.EndDiscussion(PlayerID("a"))
 		imp := e.State().ImpostorID
 		others := nonImpostors(e)
-		_, _ = e.CastVote(others[0], others[1])
-		_, _ = e.CastVote(others[1], others[2])
-		_, _ = e.CastVote(others[2], others[0])
-		_, _ = e.CastVote(imp, others[0])
+		_, _ = e.CastVote(others[0], others[1], nil)
+		_, _ = e.CastVote(others[1], others[2], nil)
+		_, _ = e.CastVote(others[2], others[0], nil)
+		_, _ = e.CastVote(imp, others[0], nil)
 		e.AdvanceRound()
 	}
 	return e
@@ -435,10 +435,10 @@ func TestNotCaughtHoldsOnRevealUntilAdvance(t *testing.T) {
 	e := votingEngine(t, 4)
 	imp := e.State().ImpostorID
 	others := nonImpostors(e)
-	_, _ = e.CastVote(others[0], others[1])
-	_, _ = e.CastVote(others[1], others[2])
-	_, _ = e.CastVote(others[2], others[0])
-	_, _ = e.CastVote(imp, others[0]) // not caught
+	_, _ = e.CastVote(others[0], others[1], nil)
+	_, _ = e.CastVote(others[1], others[2], nil)
+	_, _ = e.CastVote(others[2], others[0], nil)
+	_, _ = e.CastVote(imp, others[0], nil) // not caught
 
 	if e.State().Phase != PhaseReveal {
 		t.Fatalf("phase = %q, want reveal (should hold, not auto-advance)", e.State().Phase)
@@ -468,14 +468,239 @@ func TestGameEndsAfterFinalRound(t *testing.T) {
 		imp := e.State().ImpostorID
 		others := nonImpostors(e)
 		// Split votes so the impostor receives none -> not caught.
-		_, _ = e.CastVote(others[0], others[1])
-		_, _ = e.CastVote(others[1], others[2])
-		_, _ = e.CastVote(others[2], others[0])
-		_, _ = e.CastVote(imp, others[0])
+		_, _ = e.CastVote(others[0], others[1], nil)
+		_, _ = e.CastVote(others[1], others[2], nil)
+		_, _ = e.CastVote(others[2], others[0], nil)
+		_, _ = e.CastVote(imp, others[0], nil)
 		// Round holds on reveal; advance to the next round (or game over).
 		e.AdvanceRound()
 	}
 	if e.State().Phase != PhaseGameOver {
 		t.Fatalf("phase = %q, want game_over", e.State().Phase)
+	}
+}
+
+func TestRemovePlayerOnlyAllowedInLobby(t *testing.T) {
+	e := newTestEngine(t, 4)
+	if err := e.RemovePlayer(PlayerID("b")); err != nil {
+		t.Fatalf("RemovePlayer in lobby: %v", err)
+	}
+	if len(e.State().Players) != 3 {
+		t.Fatalf("players = %d, want 3", len(e.State().Players))
+	}
+
+	e2 := startedEngine(t, 4) // now drawing
+	if err := e2.RemovePlayer(PlayerID("b")); err != ErrNotInLobby {
+		t.Fatalf("err = %v, want ErrNotInLobby", err)
+	}
+	if len(e2.State().Players) != 4 {
+		t.Fatalf("players = %d, want 4 (unchanged)", len(e2.State().Players))
+	}
+}
+
+func TestRemovePlayerRejectsUnknown(t *testing.T) {
+	e := newTestEngine(t, 4)
+	if err := e.RemovePlayer(PlayerID("nope")); err != ErrUnknownPlayer {
+		t.Fatalf("err = %v, want ErrUnknownPlayer", err)
+	}
+}
+
+func TestSetHostIDTransitionsOwnership(t *testing.T) {
+	e := newTestEngine(t, 4)
+	if err := e.SetHostID(PlayerID("b")); err != nil {
+		t.Fatalf("SetHostID: %v", err)
+	}
+	if e.State().HostID != PlayerID("b") {
+		t.Fatalf("hostID = %q, want b", e.State().HostID)
+	}
+}
+
+func TestSetHostIDRejectsUnknown(t *testing.T) {
+	e := newTestEngine(t, 4)
+	if err := e.SetHostID(PlayerID("nope")); err != ErrUnknownPlayer {
+		t.Fatalf("err = %v, want ErrUnknownPlayer", err)
+	}
+	if e.State().HostID != PlayerID("a") {
+		t.Fatalf("hostID changed to %q, want unchanged a", e.State().HostID)
+	}
+}
+
+func TestSkipTurnAdvancesWithoutStroke(t *testing.T) {
+	e := startedEngine(t, 4)
+	before := len(e.State().Strokes)
+	events, err := e.SkipTurn()
+	if err != nil {
+		t.Fatalf("SkipTurn: %v", err)
+	}
+	if len(e.State().Strokes) != before {
+		t.Fatalf("strokes = %d, want unchanged %d (skip must not draw)", len(e.State().Strokes), before)
+	}
+	var sawTurnChanged bool
+	for _, ev := range events {
+		if _, ok := ev.(TurnChanged); ok {
+			sawTurnChanged = true
+		}
+	}
+	if !sawTurnChanged {
+		t.Fatal("expected a TurnChanged event, same as a normal stroke would produce")
+	}
+}
+
+func TestSkipTurnRejectsWrongPhase(t *testing.T) {
+	e := newTestEngine(t, 4) // still lobby
+	if _, err := e.SkipTurn(); err != ErrWrongPhase {
+		t.Fatalf("err = %v, want ErrWrongPhase", err)
+	}
+}
+
+func TestCastVoteIgnoresDisconnectedPlayers(t *testing.T) {
+	e := votingEngine(t, 4)
+	imp := e.State().ImpostorID
+	others := nonImpostors(e)
+	// Only 2 of 4 are connected; both are non-impostor "others". Once both
+	// have voted, voting must resolve without waiting for the other two.
+	connected := map[PlayerID]bool{others[0]: true, others[1]: true}
+	if _, err := e.CastVote(others[0], others[1], connected); err != nil {
+		t.Fatalf("vote 1: %v", err)
+	}
+	if e.State().Phase != PhaseVoting {
+		t.Fatalf("phase = %q, want voting (only 1/2 connected voters in)", e.State().Phase)
+	}
+	events, err := e.CastVote(others[1], others[0], connected)
+	if err != nil {
+		t.Fatalf("vote 2: %v", err)
+	}
+	if e.State().Phase != PhaseReveal {
+		t.Fatalf("phase = %q, want reveal once every connected voter has voted", e.State().Phase)
+	}
+	_ = imp
+	var sawResolved bool
+	for _, ev := range events {
+		if _, ok := ev.(PhaseChanged); ok {
+			sawResolved = true
+		}
+	}
+	if !sawResolved {
+		t.Fatal("expected voting to resolve and emit a PhaseChanged event")
+	}
+}
+
+func TestCheckVotingResolutionRecomputesOnPresenceChange(t *testing.T) {
+	e := votingEngine(t, 4)
+	others := nonImpostors(e)
+	imp := e.State().ImpostorID
+	connectedAll := map[PlayerID]bool{others[0]: true, others[1]: true, others[2]: true, imp: true}
+	if _, err := e.CastVote(others[0], others[1], connectedAll); err != nil {
+		t.Fatalf("vote: %v", err)
+	}
+	// 1/4 voted; not enough while everyone is connected.
+	if ev := e.CheckVotingResolution(connectedAll); ev != nil {
+		t.Fatalf("expected no resolution yet, got %v", ev)
+	}
+	// The three unvoted players disconnect; only the one who already voted
+	// remains connected — resolution must now trigger without a new vote.
+	connectedOne := map[PlayerID]bool{others[0]: true}
+	events := e.CheckVotingResolution(connectedOne)
+	if e.State().Phase != PhaseReveal {
+		t.Fatalf("phase = %q, want reveal", e.State().Phase)
+	}
+	if len(events) == 0 {
+		t.Fatal("expected resolution events")
+	}
+}
+
+func TestVotingWaitsWhenNoOneConnected(t *testing.T) {
+	e := votingEngine(t, 4)
+	others := nonImpostors(e)
+	imp := e.State().ImpostorID
+	connectedAll := map[PlayerID]bool{others[0]: true, others[1]: true, others[2]: true, imp: true}
+	if _, err := e.CastVote(others[0], others[1], connectedAll); err != nil {
+		t.Fatalf("vote: %v", err)
+	}
+	// Only 1/4 voted, so this alone would not resolve — but the check must
+	// also never resolve (or panic/loop) against a zero-connected set.
+	if ev := e.CheckVotingResolution(map[PlayerID]bool{}); ev != nil {
+		t.Fatalf("expected no resolution with zero connected voters, got %v", ev)
+	}
+	if e.State().Phase != PhaseVoting {
+		t.Fatalf("phase = %q, want voting (still waiting)", e.State().Phase)
+	}
+}
+
+func TestResolveImpostorTimeoutScoresLikeWrongGuess(t *testing.T) {
+	e := caughtEngine(t, 4)
+	imp := e.State().ImpostorID
+	events, err := e.ResolveImpostorTimeout()
+	if err != nil {
+		t.Fatalf("ResolveImpostorTimeout: %v", err)
+	}
+	s := e.State()
+	if !s.LastResult.ImpostorTimedOut {
+		t.Fatal("expected ImpostorTimedOut = true")
+	}
+	if s.LastResult.ImpostorGuessedRight {
+		t.Fatal("expected ImpostorGuessedRight = false")
+	}
+	for _, p := range s.Players {
+		want := 1
+		if p.ID == imp {
+			want = 0
+		}
+		if p.Score != want {
+			t.Fatalf("player %s score = %d, want %d", p.ID, p.Score, want)
+		}
+	}
+	var sawRoundEnded bool
+	for _, ev := range events {
+		if _, ok := ev.(RoundEnded); ok {
+			sawRoundEnded = true
+		}
+	}
+	if !sawRoundEnded {
+		t.Fatal("expected a RoundEnded event, same as a resolved guess would produce")
+	}
+}
+
+func TestGuessThenTimeoutOnlyResolvesOnce(t *testing.T) {
+	e := caughtEngine(t, 4)
+	imp := e.State().ImpostorID
+	word := e.State().LastResult.Word
+	if _, err := e.ImpostorGuess(imp, strings.ToUpper(word)); err != nil {
+		t.Fatalf("guess: %v", err)
+	}
+	// A timeout racing in after a real guess must not double-resolve.
+	if _, err := e.ResolveImpostorTimeout(); err != ErrWrongPhase {
+		t.Fatalf("err = %v, want ErrWrongPhase (already resolved by a real guess)", err)
+	}
+	imScore := 0
+	for _, p := range e.State().Players {
+		if p.ID == imp {
+			imScore = p.Score
+		}
+	}
+	if imScore != 2 {
+		t.Fatalf("impostor score = %d, want 2 (unchanged by the stale timeout)", imScore)
+	}
+}
+
+func TestTimeoutThenLateGuessOnlyResolvesOnce(t *testing.T) {
+	e := caughtEngine(t, 4)
+	imp := e.State().ImpostorID
+	if _, err := e.ResolveImpostorTimeout(); err != nil {
+		t.Fatalf("ResolveImpostorTimeout: %v", err)
+	}
+	// A real guess arriving late (e.g. network delay) after the timeout
+	// already resolved must not double-resolve or overwrite the result.
+	if _, err := e.ImpostorGuess(imp, "anything"); err != ErrWrongPhase {
+		t.Fatalf("err = %v, want ErrWrongPhase (already resolved by timeout)", err)
+	}
+	for _, p := range e.State().Players {
+		want := 1
+		if p.ID == imp {
+			want = 0
+		}
+		if p.Score != want {
+			t.Fatalf("player %s score = %d, want %d (unchanged by the late guess)", p.ID, p.Score, want)
+		}
 	}
 }

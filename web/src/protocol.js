@@ -12,6 +12,8 @@ export const T = {
   JoinAccepted: 'join_accepted',
   LobbyUpdate: 'lobby_update',
   PlayerLeft: 'player_left',
+  PlayerPresenceChanged: 'player_presence_changed',
+  HostChanged: 'host_changed',
   RoundStarted: 'round_started',
   StrokeBroadcast: 'stroke_broadcast',
   TurnChanged: 'turn_changed',
