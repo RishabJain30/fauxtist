@@ -128,14 +128,28 @@ func setupGame(t *testing.T, srv *httptest.Server) (*websocket.Conn, map[string]
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/room/" + cr.Code
 
 	conns := map[string]*websocket.Conn{}
-	host := dialJoin(t, wsURL, wsproto.JoinPayload{Name: "Host", Emoji: "🦊", ReconnectToken: cr.HostToken})
-	conns[cr.HostToken] = host
+	host := dialJoin(t, wsURL, wsproto.JoinPayload{PlayerID: cr.PlayerID, ReconnectToken: cr.ReconnectToken})
+	conns[cr.PlayerID] = host
+	_ = readUntil(t, host, wsproto.TypeRoomState) // drain the host's initial snapshot
+
+	var voteTarget string
 	for _, n := range []string{"N1", "N2", "N3"} {
 		c := dialJoin(t, wsURL, wsproto.JoinPayload{Name: n, Emoji: "🐙"})
-		conns[cr.Code+"-"+n] = c
+		accepted := readUntil(t, c, wsproto.TypeJoinAccepted)
+		var ap map[string]any
+		_ = json.Unmarshal(accepted.Payload, &ap)
+		pid, _ := ap["playerId"].(string)
+		if pid == "" {
+			t.Fatalf("join_accepted for %s carried no playerId", n)
+		}
+		conns[pid] = c
+		if voteTarget == "" {
+			voteTarget = pid
+		}
+		_ = readUntil(t, c, wsproto.TypeRoomState) // drain each joiner's snapshot
 	}
 	time.Sleep(150 * time.Millisecond) // let all four register
-	return host, conns, cr.Code + "-N1"
+	return host, conns, voteTarget
 }
 
 func TestFullGameReachesGameOver(t *testing.T) {

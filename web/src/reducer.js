@@ -1,5 +1,10 @@
 import { T } from './protocol.js'
 
+// Dispatched locally by useRoomSocket (never sent by the server) when a
+// join/reconnect attempt is rejected and the socket closes before ever
+// reaching room_state, so the UI can stop showing "Connecting…" forever.
+export const LOCAL_JOIN_FAILED = 'local:join_failed'
+
 export function initialState() {
   return {
     phase: 'connecting',
@@ -75,7 +80,9 @@ export function reduce(state, msg) {
     case T.ChatBroadcast:
       return { ...state, chat: [...state.chat, p] }
     case T.Error:
-      return { ...state, error: p.message }
+      return { ...state, error: p.message, errorCode: p.code }
+    case LOCAL_JOIN_FAILED:
+      return { ...state, phase: 'join_failed' }
     case T.VoicePeers:
       return { ...state, voicePeers: p.ids || [] }
     case T.VoicePeerJoined:

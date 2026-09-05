@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/RishabJain30/fauxtist/internal/game"
+	"github.com/RishabJain30/fauxtist/internal/identity"
 	"github.com/RishabJain30/fauxtist/internal/room"
 )
 
@@ -19,7 +20,6 @@ const codeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" // no ambiguous chars
 type entry struct {
 	room   *room.Room
 	cancel context.CancelFunc
-	host   game.PlayerID
 	seed   int64
 }
 
@@ -39,24 +39,31 @@ func New() *Hub {
 	}
 }
 
-// CreateRoom registers a new room whose only member (initially) is the host, and
-// returns its join code. The engine's player list grows as players join in the
-// lobby (see server.go).
-func (h *Hub) CreateRoom(hostName string) string {
+// CreateRoom registers a new room and mints the host's seat credentials. It
+// returns the join code, the host's playerId, and the host's raw reconnect
+// token — the only time that raw token is ever available outside the room's
+// own memory (where only its hash is kept).
+func (h *Hub) CreateRoom(hostName string) (code string, hostID game.PlayerID, hostToken string, err error) {
+	playerID, err := identity.NewPlayerID()
+	if err != nil {
+		return "", "", "", err
+	}
+	token, err := identity.NewReconnectToken()
+	if err != nil {
+		return "", "", "", err
+	}
+
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	code := h.uniqueCodeLocked()
+	code = h.uniqueCodeLocked()
 	h.seq++
 	seed := time.Now().UnixNano() + h.seq
-	// The host is player index 0. Its stable PlayerID is the pre-seated host id;
-	// the server hands this token back to the host so it can claim the seat.
-	host := game.PlayerID(code + "-host")
-	players := []game.Player{{ID: host, Name: hostName}}
-	r := room.NewRoom(code, players, host, seed)
+	host := game.Player{ID: game.PlayerID(playerID), Name: hostName}
+	r := room.NewRoom(code, host, identity.Hash(token), seed)
 	ctx, cancel := context.WithCancel(context.Background())
 	go r.Run(ctx)
-	h.rooms[code] = &entry{room: r, cancel: cancel, host: host, seed: seed}
-	return code
+	h.rooms[code] = &entry{room: r, cancel: cancel, seed: seed}
+	return code, host.ID, token, nil
 }
 
 // Get returns a room by code.
@@ -68,17 +75,6 @@ func (h *Hub) Get(code string) (*room.Room, bool) {
 		return nil, false
 	}
 	return e.room, true
-}
-
-// HostID returns the pre-seated host id for a room.
-func (h *Hub) HostID(code string) (game.PlayerID, bool) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	e, ok := h.rooms[code]
-	if !ok {
-		return "", false
-	}
-	return e.host, true
 }
 
 func (h *Hub) uniqueCodeLocked() string {

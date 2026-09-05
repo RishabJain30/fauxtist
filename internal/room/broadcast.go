@@ -119,11 +119,15 @@ func (r *Room) onPhaseChange(p game.Phase) {
 		r.discussionTimer = nil
 	}
 	if p == game.PhaseDiscussion {
-		host := r.engine.State().HostID
 		r.discussionTimer = time.AfterFunc(r.discussionDur, func() {
-			// Timer fires on its own goroutine; route back through the inbox so
-			// the engine is only ever touched by the Run loop.
-			r.Submit(host, wsproto.Envelope{Type: wsproto.TypeEndDiscussion})
+			// Timer fires on its own goroutine; route back through a dedicated
+			// channel (not Submit/an inbox message) since this is a
+			// server-initiated action with no connection to authenticate — the
+			// Run loop applies it directly, using whoever is host at the time.
+			select {
+			case r.discussionTimeout <- struct{}{}:
+			default:
+			}
 		})
 	}
 }

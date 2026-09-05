@@ -14,8 +14,8 @@ export default function Landing({ onEnter, initialCode }) {
     if (!name.trim()) return setErr('Enter a name')
     setBusy(true); setErr('')
     try {
-      const { code, hostToken } = await createRoom(name.trim())
-      onEnter({ code, join: { name: name.trim(), emoji, reconnectToken: hostToken } })
+      const { code, playerId, reconnectToken } = await createRoom(name.trim())
+      onEnter({ code, join: { playerId, reconnectToken } })
     } catch { setErr('Could not create room'); setBusy(false) }
   }
   const join = () => {

@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { parseInviteCode } from './invite.js'
+import { loadCredentials, saveCredentials, clearCredentials } from './credentials.js'
 import { useRoomSocket } from './useRoomSocket.js'
 import { useVoice } from './useVoice.js'
 import Landing from './components/Landing.jsx'
@@ -13,22 +14,62 @@ import VoiceBar from './components/VoiceBar.jsx'
 
 export default function App() {
   const initialCode = useMemo(() => parseInviteCode(location.pathname), [])
-  const [entry, setEntry] = useState(null)
-  if (!entry) return <Landing onEnter={setEntry} initialCode={initialCode} />
-  return <Room entry={entry} />
+  const [entry, setEntry] = useState(() => {
+    if (!initialCode) return null
+    const creds = loadCredentials(initialCode)
+    if (!creds) return null
+    // A stored seat for this exact code (e.g. after a refresh, since we
+    // rewrite the URL to /join/<code> on entry): reconnect straight in
+    // rather than showing Landing and asking for a name again.
+    return { code: initialCode, join: { playerId: creds.playerId, reconnectToken: creds.reconnectToken } }
+  })
+
+  const enter = useCallback((e) => {
+    history.replaceState(null, '', `/join/${e.code}`)
+    setEntry(e)
+  }, [])
+
+  const leave = useCallback(() => {
+    history.replaceState(null, '', '/')
+    setEntry(null)
+  }, [])
+
+  if (!entry) return <Landing onEnter={enter} initialCode={initialCode} />
+  return <Room entry={entry} onLeave={leave} />
 }
 
-function Room({ entry }) {
+function Room({ entry, onLeave }) {
   const join = useMemo(() => entry.join, [entry])
-  const { state, send, subscribe } = useRoomSocket(entry.code, join)
-  const meId = useMemo(() => {
-    if (join.reconnectToken) return join.reconnectToken
-    return `${entry.code}-${join.name}`
-  }, [entry, join])
+  const { state, send, subscribe, identity } = useRoomSocket(entry.code, join)
+  const meId = identity?.playerId ?? entry.join.playerId ?? null
+
+  useEffect(() => {
+    if (identity) saveCredentials(entry.code, identity.playerId, identity.reconnectToken)
+  }, [entry.code, identity])
+
+  useEffect(() => {
+    if (state.phase === 'join_failed') clearCredentials(entry.code)
+  }, [state.phase, entry.code])
+
+  const leaveRoom = useCallback(() => {
+    clearCredentials(entry.code)
+    onLeave()
+  }, [entry.code, onLeave])
+
   const voice = useVoice({ meId, send, subscribe })
 
   if (state.phase === 'connecting') {
     return <div className="center"><div className="card">Connecting…</div></div>
+  }
+  if (state.phase === 'join_failed') {
+    return (
+      <div className="center">
+        <div className="card col">
+          <p>{state.error || 'Could not join this room.'}</p>
+          <button className="btn-primary" onClick={leaveRoom}>Back to start</button>
+        </div>
+      </div>
+    )
   }
 
   const isHost = state.hostId === meId
@@ -36,7 +77,7 @@ function Room({ entry }) {
   if (state.phase === 'lobby') {
     content = <Lobby state={state} meId={meId} code={entry.code} onStart={() => send('start_game')} />
   } else if (state.phase === 'game_over') {
-    content = <GameOver state={state} meId={meId} send={send} />
+    content = <GameOver state={state} meId={meId} send={send} onLeave={leaveRoom} />
   } else {
     content = (
       <>

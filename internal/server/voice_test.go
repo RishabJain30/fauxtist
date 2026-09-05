@@ -44,12 +44,18 @@ func TestVoiceSignalRelayedToTarget(t *testing.T) {
 	_ = json.NewDecoder(resp.Body).Decode(&cr)
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/room/" + cr.Code
 
-	a := dialJoin(t, wsURL, wsproto.JoinPayload{Name: "A", ReconnectToken: cr.HostToken})
+	a := dialJoin(t, wsURL, wsproto.JoinPayload{PlayerID: cr.PlayerID, ReconnectToken: cr.ReconnectToken})
 	defer a.Close(websocket.StatusNormalClosure, "")
+	_ = readUntil(t, a, wsproto.TypeRoomState)
+	aID := cr.PlayerID
+
 	b := dialJoin(t, wsURL, wsproto.JoinPayload{Name: "B"})
 	defer b.Close(websocket.StatusNormalClosure, "")
-	aID := cr.HostToken
-	bID := cr.Code + "-B"
+	accepted := readUntil(t, b, wsproto.TypeJoinAccepted)
+	var ap map[string]any
+	_ = json.Unmarshal(accepted.Payload, &ap)
+	bID, _ := ap["playerId"].(string)
+	_ = readUntil(t, b, wsproto.TypeRoomState)
 
 	time.Sleep(100 * time.Millisecond)
 

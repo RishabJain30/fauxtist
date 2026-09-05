@@ -20,6 +20,7 @@ const (
 
 	// Server -> client
 	TypeRoomState       = "room_state"
+	TypeJoinAccepted    = "join_accepted"
 	TypePlayerJoined    = "player_joined"
 	TypePlayerLeft      = "player_left"
 	TypeLobbyUpdate     = "lobby_update"
@@ -59,9 +60,12 @@ type Point struct {
 	Y float64 `json:"y"`
 }
 
+// JoinPayload is a client's join or reconnect attempt: a new join carries
+// Name/Emoji; a reconnect carries PlayerID/ReconnectToken instead.
 type JoinPayload struct {
-	Name           string `json:"name"`
+	Name           string `json:"name,omitempty"`
 	Emoji          string `json:"emoji,omitempty"`
+	PlayerID       string `json:"playerId,omitempty"`
 	ReconnectToken string `json:"reconnectToken,omitempty"`
 }
 
@@ -97,6 +101,14 @@ type TurnChangedPayload struct {
 
 type ErrorPayload struct {
 	Message string `json:"message"`
+	Code    string `json:"code,omitempty"`
+}
+
+// JoinAcceptedPayload hands a newly joined (non-reconnecting) player their
+// server-minted seat credentials. Sent privately, only to that player.
+type JoinAcceptedPayload struct {
+	PlayerID       string `json:"playerId"`
+	ReconnectToken string `json:"reconnectToken"`
 }
 
 // VoiceSignalIn is a client's signaling message addressed to another peer.
