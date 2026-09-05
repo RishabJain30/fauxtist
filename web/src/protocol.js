@@ -9,6 +9,7 @@ export const T = {
   EndDiscussion: 'end_discussion',
   // server -> client
   RoomState: 'room_state',
+  JoinAccepted: 'join_accepted',
   LobbyUpdate: 'lobby_update',
   PlayerLeft: 'player_left',
   RoundStarted: 'round_started',

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { reduce, initialState } from './reducer.js'
+import { reduce, initialState, LOCAL_JOIN_FAILED } from './reducer.js'
 import { T } from './protocol.js'
 
 describe('reduce', () => {
@@ -47,6 +47,19 @@ describe('reduce', () => {
     s = reduce(s, { type: T.GameOver, payload: { finalScores: [{ id: 'a', score: 2 }] } })
     expect(s.phase).toBe('game_over')
     expect(s.finalScores).toHaveLength(1)
+  })
+
+  it('records the error message and code from an error frame', () => {
+    const s = reduce(initialState(), { type: T.Error, payload: { message: 'that name is already taken in this room', code: 'name_taken' } })
+    expect(s.error).toBe('that name is already taken in this room')
+    expect(s.errorCode).toBe('name_taken')
+  })
+
+  it('moves to join_failed on the local join-failure signal, without ever having reached room_state', () => {
+    let s = reduce(initialState(), { type: T.Error, payload: { message: 'invalid or expired reconnect token', code: 'invalid_reconnect' } })
+    s = reduce(s, { type: LOCAL_JOIN_FAILED })
+    expect(s.phase).toBe('join_failed')
+    expect(s.error).toBe('invalid or expired reconnect token')
   })
 
   it('accumulates chat', () => {

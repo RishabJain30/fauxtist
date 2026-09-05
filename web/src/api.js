@@ -5,5 +5,5 @@ export async function createRoom(name) {
     body: JSON.stringify({ name }),
   })
   if (!res.ok) throw new Error('could not create room')
-  return res.json() // { code, hostToken }
+  return res.json() // { code, playerId, reconnectToken }
 }
