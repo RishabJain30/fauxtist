@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/RishabJain30/fauxtist/internal/envconfig"
 	"github.com/RishabJain30/fauxtist/internal/hub"
 	"github.com/RishabJain30/fauxtist/internal/server"
 )
@@ -38,6 +39,11 @@ func main() {
 func run() int {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
+
+	if err := envconfig.Validate(); err != nil {
+		logger.Error("invalid timing configuration", "error", err)
+		return 1
+	}
 
 	port := os.Getenv("PORT")
 	if port == "" {

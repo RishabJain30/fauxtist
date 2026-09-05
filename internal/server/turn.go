@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/RishabJain30/fauxtist/internal/envconfig"
 	"github.com/RishabJain30/fauxtist/internal/wsproto"
 )
 
@@ -39,12 +40,7 @@ func DefaultTURNConfig() TURNConfig {
 	if raw := os.Getenv("FAUXTIST_STUN_URLS"); raw != "" {
 		stun = splitCommaList(raw)
 	}
-	ttl := 3600 * time.Second
-	if raw := os.Getenv("FAUXTIST_TURN_CREDENTIAL_TTL_SECONDS"); raw != "" {
-		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
-			ttl = time.Duration(n) * time.Second
-		}
-	}
+	ttl, _ := envconfig.PositiveDurationSeconds("FAUXTIST_TURN_CREDENTIAL_TTL_SECONDS", 3600*time.Second)
 	return TURNConfig{
 		StunURLs:      stun,
 		TurnURLs:      splitCommaList(os.Getenv("FAUXTIST_TURN_URLS")),
