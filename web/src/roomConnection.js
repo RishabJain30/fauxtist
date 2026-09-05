@@ -23,7 +23,14 @@ export const FATAL_ERROR_CODES = new Set([
   'game_started',
   'invalid_join',
   'unsupported_version',
+  'room_closed',
 ])
+
+// FATAL_CLOSE_CODES are raw WebSocket close codes that mean "don't retry"
+// even with no preceding Error envelope — the room expired or the process
+// is shutting down (4003), or the join frame itself was rejected at the
+// protocol level (4001/4002) before any Error envelope could help.
+const FATAL_CLOSE_CODES = new Set([4001, 4002, 4003])
 
 export function backoffDelay(attempt, random = Math.random) {
   const base = BACKOFF_DELAYS_MS[Math.min(attempt, BACKOFF_DELAYS_MS.length - 1)]
@@ -161,8 +168,9 @@ export function createRoomConnection(code, join, handlers, deps = {}) {
       onDispatch(env)
     }
 
-    socket.onclose = () => {
+    socket.onclose = (event) => {
       if (stopped || ws !== socket) return
+      if (FATAL_CLOSE_CODES.has(event?.code)) fatal = true
       if (fatal) {
         if (!everConnected) onDispatch({ type: LOCAL_JOIN_FAILED })
         setStatus('failed')

@@ -13,6 +13,7 @@ export const T = {
   ImpostorGuess: 'impostor_guess',
   EndDiscussion: 'end_discussion',
   Resync: 'resync',
+  IceConfigRequest: 'ice_config_request',
   // server -> client
   StateSnapshot: 'state_snapshot',
   JoinAccepted: 'join_accepted',
@@ -39,6 +40,7 @@ export const T = {
   VoicePeers: 'voice_peers',
   VoicePeerJoined: 'voice_peer_joined',
   VoicePeerLeft: 'voice_peer_left',
+  IceConfig: 'ice_config',
 }
 
 // SEQUENCED_TYPES are the server->client messages that carry the room's

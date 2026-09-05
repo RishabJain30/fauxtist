@@ -174,6 +174,19 @@ describe('createRoomConnection', () => {
     conn.stop()
   })
 
+  it('does not retry after a raw close carrying a fatal protocol close code', () => {
+    const conn = setUp()
+    const ws = FakeWebSocket.instances[0]
+    ws.open()
+    ws.message(snapshotEnvelope(1))
+    ws.serverClose(4003) // room expired/shut down — no Error envelope precedes it
+
+    expect(statuses.at(-1)).toBe('failed')
+    vi.runAllTimers()
+    expect(FakeWebSocket.instances.length).toBe(1) // never retried
+    conn.stop()
+  })
+
   // --- Requirement #19: fake-timer backoff, no real waiting ---
 
   it('backs off with the documented schedule and resets the attempt counter after reconnecting', () => {

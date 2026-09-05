@@ -61,18 +61,29 @@ handler builds or reads a raw `{type, payload}` object by hand.
 ### Client command types
 
 `join`, `start_game`, `stroke`, `chat_message`, `cast_vote`,
-`impostor_guess`, `end_discussion`, `new_game`, `resync`, plus the voice
-signaling types (`voice_join`, `voice_leave`, `voice_signal`,
-`voice_state`).
+`impostor_guess`, `end_discussion`, `new_game`, `resync`,
+`ice_config_request`, plus the voice signaling types (`voice_join`,
+`voice_leave`, `voice_signal`, `voice_state`).
+
+Every one of these (except `join`, handled by its own dedicated path) is
+validated for shape — known type, non-empty/bounded `requestId`, bounded
+payload size, exactly one JSON value with no trailing data — before it
+ever reaches a room actor (`wsproto.ValidateEnvelope`); a failure here is
+dropped the same as any other malformed mid-session frame (see
+[Malformed and mismatched frames](#malformed-and-mismatched-frames-mid-session)).
+Per-type semantic limits (stroke point count/coordinate bounds/width/
+color, chat/guess length, voice-signal target/kind/size) are enforced
+once the room actor unmarshals the payload — see
+[Input validation](#input-validation).
 
 ### Server event types
 
 `state_snapshot`, `join_accepted`, `lobby_update`, `player_left`,
 `player_presence_changed`, `host_changed`, `round_started`,
 `stroke_broadcast`, `turn_changed`, `phase_changed`, `vote_update`,
-`round_result`, `game_over`, `chat_broadcast`, `error`, plus the voice
-broadcast types (`voice_peers`, `voice_peer_joined`, `voice_peer_left`,
-`voice_signal`).
+`round_result`, `game_over`, `chat_broadcast`, `error`, `ice_config`,
+plus the voice broadcast types (`voice_peers`, `voice_peer_joined`,
+`voice_peer_left`, `voice_signal`).
 
 ## Revisions and sequencing
 
@@ -210,6 +221,56 @@ Browsers answer real WebSocket ping frames automatically at the transport
 level; there is no application-level heartbeat message, and the frontend
 needs no code for this at all.
 
+## Input validation
+
+Beyond the envelope-shape checks in
+[Client command types](#client-command-types), the room actor validates
+each command's own payload (`internal/room/validate.go`) before ever
+calling into the game engine:
+
+| Command | Rules |
+|---|---|
+| `stroke` | 1–500 points; every coordinate finite and within [-0.5, 1.5] (a small overscan margin past the canvas's normalized [0,1]); width 0.5–20; color in the supported palette |
+| `chat_message` | trimmed; non-empty; ≤300 runes |
+| `impostor_guess` | trimmed; ≤100 runes (empty is left to the engine to simply score as wrong) |
+| `cast_vote` | target must be a player in the current roster (enforced by the game engine itself) |
+| `voice_signal` | target must be another currently connected player (never the sender); `kind` must be `offer`/`answer`/`ice`; payload ≤8 KiB |
+| new join's `emoji` | empty (defaults to the first palette entry) or exactly one of the app's supported emoji |
+
+A rejected command never mutates state or advances the room's revision;
+most send a typed `error` back (see below), matching the same-named
+validation failure code (`invalid_stroke`, `invalid_chat`,
+`invalid_guess`, `invalid_voice_signal`).
+
+## Rate limiting
+
+Every connection carries five independent token buckets (one per command
+category: ordinary control/game commands, `stroke`, `chat_message`, voice
+signaling, and `resync`), checked with a non-blocking `Allow()` — a
+saturated bucket never stalls the room actor waiting for capacity. A
+rejected message never mutates state or advances the revision, same as a
+failed validation; the client gets back a typed `rate_limited` error.
+Buckets are sized generously above normal play (see
+`internal/room/ratelimit.go` for exact numbers) so ordinary gameplay and
+WebRTC negotiation never brush against them. A connection that keeps
+sending past the limit for more than 20 messages in a row — not a burst,
+sustained abuse — is disconnected with `StatusPolicyViolation` (1008)
+rather than left to churn rejections forever.
+
+`resync` in particular is capped tightly (a handful of requests, then a
+slow trickle) specifically so a client cannot use it to poll the server
+continuously.
+
+## ICE configuration
+
+`ice_config_request` (empty payload) asks for the current best-effort
+WebRTC ICE server list; the server answers with `ice_config`
+(`{"iceServers": [...]}`) directly on the same connection — this never
+touches game state, so it isn't a room actor command and doesn't
+consume the room's revision. See [docs/turn.md](./turn.md) for how STUN
+and TURN are configured, and why this is a WebSocket round trip rather
+than a separate HTTP endpoint.
+
 ## Error payloads
 
 ```json
@@ -223,22 +284,29 @@ needs no code for this at all.
 
 `code` is always present and stable; `message` is human-readable but never
 a raw internal Go error. Known codes: `invalid_join`, `invalid_reconnect`,
-`name_taken`, `room_full`, `game_started` (join/reconnect rejections, see
-below), `unsupported_version`, `invalid_envelope` (protocol-level
-rejections), and `bad_payload` / `unknown_message_type` (malformed
-in-session commands).
+`name_taken`, `room_full`, `game_started`, `room_closed` (join/reconnect
+rejections, see below), `unsupported_version`, `invalid_envelope`
+(protocol-level rejections), `bad_payload` / `unknown_message_type`
+(malformed in-session commands), `rate_limited`, and
+`invalid_stroke` / `invalid_chat` / `invalid_guess` / `invalid_voice_signal`
+(see [Input validation](#input-validation) and
+[Rate limiting](#rate-limiting)).
 
 ## Close codes
 
 | Code | Meaning |
 |---|---|
 | 1000 (`StatusNormalClosure`) | Intentional close — a reconnect replacing this seat's prior connection, or the client leaving |
-| 1008 (`StatusPolicyViolation`) | Join/reconnect rejected on business rules (see the error payload's `code` for why) |
+| 1008 (`StatusPolicyViolation`) | Join/reconnect rejected on business rules, or sustained rate-limit abuse |
 | 4001 (`CloseUnsupportedVersion`) | The join frame's protocol version isn't supported |
 | 4002 (`CloseInvalidEnvelope`) | The first frame wasn't a valid join envelope at all |
+| 4003 (`CloseRoomClosed`) | The room was torn down out from under a still-connected client — it expired from inactivity, or the process is shutting down |
 
-4001/4002 are in the private-use range (RFC 6455 §7.4.2) and always follow
-a structured `error` frame with a matching `code`.
+4001/4002/4003 are in the private-use range (RFC 6455 §7.4.2). 4001/4002
+always follow a structured `error` frame with a matching `code`; 4003 can
+arrive as a bare close frame (there may be no live room actor left to
+send an `error` frame from), so the frontend treats these close codes as
+fatal directly, not only via a preceding `error` payload's `code`.
 
 ## Malformed and mismatched frames mid-session
 
@@ -292,6 +360,9 @@ present; if either is, the whole frame is treated as a reconnect attempt.
   - `name_taken` — another seat already has that name (case-insensitive)
   - `room_full` — roster already at capacity
   - `game_started` — new joins are lobby-only
+  - `room_closed` — the room expired or the process is shutting down in
+    the narrow window between `Hub.Get` finding it and this join reaching
+    its now-stopped actor; treat the same as "room not found"
 
 ### Connection replacement
 

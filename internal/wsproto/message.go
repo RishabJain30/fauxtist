@@ -14,6 +14,12 @@ const ProtocolVersion = 1
 const (
 	CloseUnsupportedVersion = 4001
 	CloseInvalidEnvelope    = 4002
+	// CloseRoomClosed is sent when a room is torn down out from under a
+	// still-connected client: it expired from inactivity, or the process is
+	// shutting down. Distinct from a normal 1000 closure so the client's
+	// reconnect logic can recognize the room itself is gone rather than
+	// retrying against a socket that will never come back.
+	CloseRoomClosed = 4003
 )
 
 // Message type constants. Client->server and server->client share one namespace.
@@ -32,6 +38,11 @@ const (
 	TypeVoiceState    = "voice_state"
 	TypeNewGame       = "new_game"
 	TypeResync        = "resync"
+	// TypeIceConfigRequest asks for the current best-effort WebRTC ICE
+	// configuration (STUN always, TURN if configured) — handled directly
+	// by the server's connection handler rather than the room actor, since
+	// it depends on no game state. See internal/server/turn.go.
+	TypeIceConfigRequest = "ice_config_request"
 
 	// Server -> client
 	TypeStateSnapshot         = "state_snapshot"
@@ -53,6 +64,7 @@ const (
 	TypeVoicePeers            = "voice_peers"
 	TypeVoicePeerJoined       = "voice_peer_joined"
 	TypeVoicePeerLeft         = "voice_peer_left"
+	TypeIceConfig             = "ice_config"
 )
 
 // Envelope is the outer wire frame for every message in both directions.
@@ -175,4 +187,19 @@ type VoiceSignalIn struct {
 type VoiceStateIn struct {
 	Muted    bool `json:"muted"`
 	Speaking bool `json:"speaking"`
+}
+
+// IceServer is one entry of an RTCPeerConnection's iceServers config.
+// Username/Credential are only set for a TURN entry with time-limited
+// REST credentials (see internal/server/turn.go); a STUN entry needs
+// neither.
+type IceServer struct {
+	URLs       []string `json:"urls"`
+	Username   string   `json:"username,omitempty"`
+	Credential string   `json:"credential,omitempty"`
+}
+
+// IceConfigPayload answers a TypeIceConfigRequest.
+type IceConfigPayload struct {
+	IceServers []IceServer `json:"iceServers"`
 }

@@ -113,7 +113,7 @@ func driveThroughDrawing(t *testing.T, r *Room, players []testPlayer, watcher te
 	for _, p := range players {
 		byID[string(p.playerID)] = p
 	}
-	first, _ := wsproto.Encode(wsproto.TypeStroke, wsproto.StrokePayload{Points: []wsproto.Point{{X: 0.2, Y: 0.2}}})
+	first, _ := wsproto.Encode(wsproto.TypeStroke, wsproto.StrokePayload{Points: []wsproto.Point{{X: 0.2, Y: 0.2}}, Color: "#111", Width: 3})
 	r.Submit(players[0].playerID, players[0].connID, first)
 
 	deadline := time.Now().Add(5 * time.Second)
@@ -128,7 +128,7 @@ func driveThroughDrawing(t *testing.T, r *Room, players []testPlayer, watcher te
 			_ = json.Unmarshal(env.Payload, &p)
 			cur, _ := p["currentPlayer"].(string)
 			if pl, ok := byID[cur]; ok {
-				s, _ := wsproto.Encode(wsproto.TypeStroke, wsproto.StrokePayload{Points: []wsproto.Point{{X: 0.2, Y: 0.2}}})
+				s, _ := wsproto.Encode(wsproto.TypeStroke, wsproto.StrokePayload{Points: []wsproto.Point{{X: 0.2, Y: 0.2}}, Color: "#111", Width: 3})
 				r.Submit(pl.playerID, pl.connID, s)
 			}
 		case wsproto.TypePhaseChanged:
@@ -173,7 +173,7 @@ func TestReconnectingBeforeDrawingDeadlinePreventsSkip(t *testing.T) {
 	// Wait past the original skip deadline, then confirm it's still the
 	// reconnected host's turn (a stroke from them must be accepted).
 	time.Sleep(skip + 150*time.Millisecond)
-	stroke, _ := wsproto.Encode(wsproto.TypeStroke, wsproto.StrokePayload{Points: []wsproto.Point{{X: 0.3, Y: 0.3}}})
+	stroke, _ := wsproto.Encode(wsproto.TypeStroke, wsproto.StrokePayload{Points: []wsproto.Point{{X: 0.3, Y: 0.3}}, Color: "#111", Width: 3})
 	r.Submit(host2.playerID, host2.connID, stroke)
 	env := readUntilType(t, players[1].conn, wsproto.TypeTurnChanged, 2*time.Second)
 	var p map[string]any

@@ -1,6 +1,10 @@
 web/node_modules
+web/dist
 internal/webui/dist
 .git
+.github
 docs
 tasks
 *.md
+.env
+.env.*

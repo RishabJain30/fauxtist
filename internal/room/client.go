@@ -10,6 +10,10 @@ import (
 	"github.com/RishabJain30/fauxtist/internal/wsproto"
 )
 
+// closeRoomClosed is the close code sent when a room tears itself down out
+// from under a still-connected client (expiry or process shutdown).
+const closeRoomClosed = websocket.StatusCode(wsproto.CloseRoomClosed)
+
 // Client is one player's live WebSocket connection. ConnID identifies this
 // specific connection instance for a seat; a later reconnect mints a new
 // Client with a new ConnID, and the old one is closed and no longer
@@ -21,6 +25,14 @@ type Client struct {
 	Emoji    string
 	conn     *websocket.Conn
 	send     chan wsproto.Envelope
+	limiters *rateLimiters
+
+	// consecutiveRateLimited counts back-to-back rejected messages since
+	// the last one that was actually processed. Only ever touched from the
+	// Run goroutine (see handle). A client that won't stop flooding past
+	// abuseThreshold gets disconnected outright rather than left to churn
+	// rejected requests forever.
+	consecutiveRateLimited int
 }
 
 // newClient wraps a websocket connection with resolved seat identity.
@@ -32,6 +44,7 @@ func newClient(id game.PlayerID, connID uint64, name, emoji string, conn *websoc
 		Emoji:    emoji,
 		conn:     conn,
 		send:     make(chan wsproto.Envelope, 32),
+		limiters: newRateLimiters(),
 	}
 }
 
@@ -66,12 +79,17 @@ func (c *Client) trySend(env wsproto.Envelope) {
 }
 
 // closeReplaced closes a superseded connection so its read loop unblocks
-// immediately instead of waiting on a future read or network timeout. The
-// close handshake (which waits on the peer) runs in its own goroutine so it
-// can never stall the room's single-threaded actor loop.
+// immediately instead of waiting on a future read or network timeout.
 func (c *Client) closeReplaced() {
+	c.close(websocket.StatusNormalClosure, "replaced by reconnect")
+}
+
+// close closes the underlying connection with the given status and reason.
+// The close handshake (which waits on the peer) runs in its own goroutine
+// so it can never stall the room's single-threaded actor loop.
+func (c *Client) close(status websocket.StatusCode, reason string) {
 	go func() {
-		_ = c.conn.Close(websocket.StatusNormalClosure, "replaced by reconnect")
+		_ = c.conn.Close(status, reason)
 	}()
 }
 

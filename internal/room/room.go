@@ -3,8 +3,12 @@ package room
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"math/rand"
+	"sync"
 	"time"
+
+	"nhooyr.io/websocket"
 
 	"github.com/RishabJain30/fauxtist/internal/game"
 	"github.com/RishabJain30/fauxtist/internal/identity"
@@ -46,6 +50,14 @@ type Room struct {
 	// heartbeats, and rejected commands never bump it.
 	revision int64
 
+	// clock is the room's notion of "now", for activity tracking and
+	// expiry decisions — overridden in tests via WithClock so idle-timeout
+	// tests never need a real sleep. lastActivity is stamped by touch at
+	// every meaningful event (creation, join/reconnect, disconnect,
+	// dispatched command); MaybeExpire compares against it.
+	clock        func() time.Time
+	lastActivity time.Time
+
 	inbox             chan inbound
 	joins             chan joinReq
 	leaves            chan leaveReq
@@ -55,7 +67,9 @@ type Room struct {
 	drawSkipCh        chan drawSkipMsg
 	guessTimeoutCh    chan guessTimeoutMsg
 	snapshotCh        chan snapshotReq
+	expireCh          chan expireReq
 	done              chan struct{}
+	shutdownOnce      sync.Once
 
 	discussionTimer    *time.Timer
 	discussionDeadline time.Time
@@ -69,10 +83,10 @@ type Room struct {
 // NewRoom builds a lobby-phase room pre-seeded with its host. hostTokenHash
 // is the sha256 digest of the host's reconnect token; the raw token is never
 // held by the room.
-func NewRoom(code string, host game.Player, hostTokenHash identity.TokenHash, seed int64, durations Durations) *Room {
+func NewRoom(code string, host game.Player, hostTokenHash identity.TokenHash, seed int64, durations Durations, opts ...RoomOption) *Room {
 	rng := rand.New(rand.NewSource(seed))
 	wb := wordbank.New(rand.New(rand.NewSource(seed + 1)))
-	return &Room{
+	r := &Room{
 		Code:              code,
 		engine:            game.NewEngine([]game.Player{host}, host.ID, 1, rng, wb),
 		clients:           map[game.PlayerID]*Client{},
@@ -80,6 +94,7 @@ func NewRoom(code string, host game.Player, hostTokenHash identity.TokenHash, se
 		seats:             map[game.PlayerID]seatCredential{host.ID: {tokenHash: hostTokenHash}},
 		presence:          map[game.PlayerID]*presence{},
 		durations:         durations,
+		clock:             time.Now,
 		inbox:             make(chan inbound, 64),
 		joins:             make(chan joinReq, 8),
 		leaves:            make(chan leaveReq, 8),
@@ -89,15 +104,25 @@ func NewRoom(code string, host game.Player, hostTokenHash identity.TokenHash, se
 		drawSkipCh:        make(chan drawSkipMsg, 1),
 		guessTimeoutCh:    make(chan guessTimeoutMsg, 1),
 		snapshotCh:        make(chan snapshotReq, 4),
+		expireCh:          make(chan expireReq, 1),
 		done:              make(chan struct{}),
 		graceTimers:       map[game.PlayerID]*time.Timer{},
 	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	r.lastActivity = r.clock()
+	return r
 }
 
 // Run is the single-goroutine event loop. Nothing else mutates the engine,
-// presence, or timers.
+// presence, or timers. On return, for any reason, every timer is stopped
+// and every connected client is closed — an abandoned or explicitly shut
+// down room never leaves either running behind it.
 func (r *Room) Run(ctx context.Context) {
+	defer r.Shutdown() // idempotent: marks r.done closed so blocked Join/MaybeExpire callers never hang past this point
 	defer r.stopAllTimers()
+	defer r.closeAllClients()
 	for {
 		select {
 		case <-ctx.Done():
@@ -120,14 +145,22 @@ func (r *Room) Run(ctx context.Context) {
 			r.handleGuessTimeout(m)
 		case req := <-r.snapshotCh:
 			req.resp <- RoomSnapshot{
-				Phase:    r.engine.State().Phase,
-				HostID:   r.engine.State().HostID,
-				Players:  r.playerViews(),
-				Revision: r.revision,
+				Phase:          r.engine.State().Phase,
+				HostID:         r.engine.State().HostID,
+				Players:        r.playerViews(),
+				Revision:       r.revision,
+				ConnectedCount: len(r.clients),
+				LastActivityAt: r.lastActivity,
+			}
+		case req := <-r.expireCh:
+			expired := r.handleExpireCheck(req)
+			req.resp <- expired
+			if expired {
+				return
 			}
 		case msg := <-r.inbox:
 			if c, ok := r.clients[msg.from]; ok && c.ConnID == msg.connID {
-				r.handle(msg)
+				r.handle(c, msg)
 			}
 		}
 	}
@@ -149,10 +182,12 @@ func (r *Room) Submit(from game.PlayerID, connID uint64, env wsproto.Envelope) {
 // future admin/observability endpoint) that must never touch engine or
 // presence state directly.
 type RoomSnapshot struct {
-	Phase    game.Phase
-	HostID   game.PlayerID
-	Players  []wsproto.PlayerView
-	Revision int64
+	Phase          game.Phase
+	HostID         game.PlayerID
+	Players        []wsproto.PlayerView
+	Revision       int64
+	ConnectedCount int
+	LastActivityAt time.Time
 }
 
 type snapshotReq struct{ resp chan RoomSnapshot }
@@ -165,8 +200,26 @@ func (r *Room) Snapshot() RoomSnapshot {
 	return <-resp
 }
 
-// handle dispatches one inbound message to the engine and broadcasts events.
-func (r *Room) handle(msg inbound) {
+// handle dispatches one inbound message to the engine and broadcasts
+// events. Every dispatched message first spends one token from its
+// category's rate limiter (see ratelimit.go); a message that doesn't get
+// one is rejected outright, before it ever reaches engine or validation
+// logic, and never counts as activity. A client that keeps flooding past
+// abuseThreshold in a row is disconnected.
+func (r *Room) handle(c *Client, msg inbound) {
+	if !c.allow(msg.envelope.Type) {
+		c.consecutiveRateLimited++
+		if c.consecutiveRateLimited > abuseThreshold {
+			slog.Warn("disconnecting client for sustained rate-limit abuse", "room", r.Code, "player", c.PlayerID)
+			c.close(websocket.StatusPolicyViolation, "rate limit exceeded")
+			return
+		}
+		r.sendError(msg.from, msg.envelope.RequestID, "rate_limited", "too many requests, slow down")
+		return
+	}
+	c.consecutiveRateLimited = 0
+	r.touch()
+
 	switch msg.envelope.Type {
 	case wsproto.TypeStartGame:
 		r.apply(r.engine.StartGame(msg.from))
@@ -176,7 +229,12 @@ func (r *Room) handle(msg inbound) {
 			r.sendError(msg.from, msg.envelope.RequestID, "bad_payload", "bad stroke payload")
 			return
 		}
-		r.apply(r.engine.AddStroke(msg.from, toStroke(msg.from, p)))
+		s, err := validateStroke(p)
+		if err != nil {
+			r.sendError(msg.from, msg.envelope.RequestID, "invalid_stroke", err.Error())
+			return
+		}
+		r.apply(r.engine.AddStroke(msg.from, toStroke(msg.from, s)))
 	case wsproto.TypeEndDiscussion:
 		r.apply(r.engine.EndDiscussion(msg.from))
 	case wsproto.TypeNewGame:
@@ -194,14 +252,24 @@ func (r *Room) handle(msg inbound) {
 			r.sendError(msg.from, msg.envelope.RequestID, "bad_payload", "bad guess payload")
 			return
 		}
-		r.apply(r.engine.ImpostorGuess(msg.from, p.Guess))
+		guess, err := validateGuess(p.Guess)
+		if err != nil {
+			r.sendError(msg.from, msg.envelope.RequestID, "invalid_guess", err.Error())
+			return
+		}
+		r.apply(r.engine.ImpostorGuess(msg.from, guess))
 		r.evaluateGuessDeadline() // a valid guess cancels the pending timeout
 	case wsproto.TypeChatMessage:
 		var p wsproto.ChatPayload
 		if err := json.Unmarshal(msg.envelope.Payload, &p); err != nil {
 			return
 		}
-		r.broadcastChat(msg.from, p.Text)
+		text, err := validateChatText(p.Text)
+		if err != nil {
+			r.sendError(msg.from, msg.envelope.RequestID, "invalid_chat", err.Error())
+			return
+		}
+		r.broadcastChat(msg.from, text)
 	case wsproto.TypeVoiceJoin:
 		r.voiceJoin(msg.from)
 	case wsproto.TypeVoiceLeave:
@@ -209,6 +277,10 @@ func (r *Room) handle(msg inbound) {
 	case wsproto.TypeVoiceSignal:
 		var p wsproto.VoiceSignalIn
 		if err := json.Unmarshal(msg.envelope.Payload, &p); err != nil {
+			return
+		}
+		if err := validateVoiceSignal(p, msg.from, r.connectedSet()); err != nil {
+			r.sendError(msg.from, msg.envelope.RequestID, "invalid_voice_signal", err.Error())
 			return
 		}
 		r.relayVoiceSignal(msg.from, p)
@@ -222,9 +294,7 @@ func (r *Room) handle(msg inbound) {
 		// Explicit resync request: a read-only re-send of the current
 		// snapshot to this one connection. Never bumps the revision — it
 		// observes state, it doesn't change it.
-		if c, ok := r.clients[msg.from]; ok {
-			r.sendSnapshot(c)
-		}
+		r.sendSnapshot(c)
 	default:
 		r.sendError(msg.from, msg.envelope.RequestID, "unknown_message_type", "unknown message type")
 	}
@@ -237,17 +307,19 @@ func (r *Room) handle(msg inbound) {
 // also where the room's revision advances: exactly once per accepted
 // command, even when that command cascades into several engine events or
 // several recipient-specific wire messages. A rejected command (err != nil)
-// or one that produced no events never bumps it.
-func (r *Room) apply(events []game.Event, err error) {
+// or one that produced no events never bumps it. Returns whether anything
+// was actually applied.
+func (r *Room) apply(events []game.Event, err error) bool {
 	if err != nil || len(events) == 0 {
 		// Validation errors are per-action; the client UI prevents most of them.
 		// Kept explicit so future logging can hook in here.
-		return
+		return false
 	}
 	r.revision++
 	for _, ev := range events {
 		r.broadcastEvent(ev)
 	}
+	return true
 }
 
 func toStroke(by game.PlayerID, p wsproto.StrokePayload) game.Stroke {

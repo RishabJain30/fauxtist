@@ -66,7 +66,7 @@ func TestReconnectReceivesLatestCompleteSnapshot(t *testing.T) {
 
 	// Advance state a bit (a stroke) before the reconnect, so the snapshot
 	// the reconnect gets back must reflect it, not stale lobby-era state.
-	stroke, _ := wsproto.Encode(wsproto.TypeStroke, wsproto.StrokePayload{Points: []wsproto.Point{{X: 0.1, Y: 0.1}}})
+	stroke, _ := wsproto.Encode(wsproto.TypeStroke, wsproto.StrokePayload{Points: []wsproto.Point{{X: 0.1, Y: 0.1}}, Color: "#111", Width: 3})
 	r.Submit(host.playerID, host.connID, stroke)
 	readUntilType(t, players[1].conn, wsproto.TypeTurnChanged, twoSeconds)
 
