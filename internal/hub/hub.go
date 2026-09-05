@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"math/rand"
 	"sync"
 	"time"
@@ -105,6 +106,7 @@ func (h *Hub) CreateRoom(hostName string) (code string, hostID game.PlayerID, ho
 	ctx, cancel := context.WithCancel(context.Background())
 	go r.Run(ctx)
 	h.rooms[code] = &entry{room: r, cancel: cancel, seed: seed}
+	slog.Info("room created", "code", code, "rooms", len(h.rooms))
 	return code, host.ID, token, nil
 }
 
@@ -167,6 +169,7 @@ func (h *Hub) removeRoom(code string, want *room.Room) {
 	delete(h.rooms, code)
 	h.mu.Unlock()
 
+	slog.Info("room expired", "code", code)
 	e.cancel()
 	e.room.Shutdown()
 }
@@ -203,5 +206,6 @@ func (h *Hub) Close() {
 			e.cancel()
 			e.room.Shutdown()
 		}
+		slog.Info("hub closed", "rooms_stopped", len(entries))
 	})
 }

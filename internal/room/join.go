@@ -2,6 +2,7 @@ package room
 
 import (
 	"errors"
+	"log/slog"
 	"strings"
 
 	"nhooyr.io/websocket"
@@ -118,6 +119,7 @@ func (r *Room) processJoin(j joinReq) {
 		old.closeReplaced()
 	}
 	r.clients[player.ID] = c
+	slog.Info("player connected", "room", r.Code, "player", player.ID, "reconnect", j.req.Reconnect)
 	// A join or reconnect always changes externally visible state (a new
 	// roster entry, or a presence flip visible in every client's player
 	// list) — bump once for the whole operation, before anything it
@@ -235,6 +237,7 @@ func (r *Room) processLeave(lv leaveReq) {
 	delete(r.clients, lv.playerID)
 	r.revision++ // presence flip, visible in every client's player list
 	r.touch()
+	slog.Info("player disconnected", "room", r.Code, "player", lv.playerID)
 	if r.voicePresent[lv.playerID] {
 		delete(r.voicePresent, lv.playerID)
 		r.broadcastVoicePeerLeft(lv.playerID)

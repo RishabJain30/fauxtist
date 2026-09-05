@@ -23,18 +23,19 @@ const (
 // only ever valid as the very first frame, handled by its own dedicated
 // path (readJoinFrame), never through Submit.
 var clientCommandTypes = map[string]bool{
-	TypeStartGame:     true,
-	TypeStroke:        true,
-	TypeChatMessage:   true,
-	TypeCastVote:      true,
-	TypeImpostorGuess: true,
-	TypeEndDiscussion: true,
-	TypeVoiceJoin:     true,
-	TypeVoiceLeave:    true,
-	TypeVoiceSignal:   true,
-	TypeVoiceState:    true,
-	TypeNewGame:       true,
-	TypeResync:        true,
+	TypeStartGame:        true,
+	TypeStroke:           true,
+	TypeChatMessage:      true,
+	TypeCastVote:         true,
+	TypeImpostorGuess:    true,
+	TypeEndDiscussion:    true,
+	TypeVoiceJoin:        true,
+	TypeVoiceLeave:       true,
+	TypeVoiceSignal:      true,
+	TypeVoiceState:       true,
+	TypeNewGame:          true,
+	TypeResync:           true,
+	TypeIceConfigRequest: true,
 }
 
 var (

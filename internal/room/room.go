@@ -3,6 +3,7 @@ package room
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"math/rand"
 	"sync"
 	"time"
@@ -209,6 +210,7 @@ func (r *Room) handle(c *Client, msg inbound) {
 	if !c.allow(msg.envelope.Type) {
 		c.consecutiveRateLimited++
 		if c.consecutiveRateLimited > abuseThreshold {
+			slog.Warn("disconnecting client for sustained rate-limit abuse", "room", r.Code, "player", c.PlayerID)
 			c.close(websocket.StatusPolicyViolation, "rate limit exceeded")
 			return
 		}

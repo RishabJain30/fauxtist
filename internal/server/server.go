@@ -6,10 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"log/slog"
 	"mime"
 	"net/http"
-	"os"
+	"sync/atomic"
+	"time"
 
+	"golang.org/x/time/rate"
 	"nhooyr.io/websocket"
 
 	"github.com/RishabJain30/fauxtist/internal/game"
@@ -36,9 +39,18 @@ var (
 
 // Server wires HTTP routes to the hub.
 type Server struct {
-	hub       *hub.Hub
-	mux       *http.ServeMux
-	heartbeat HeartbeatConfig
+	hub            *hub.Hub
+	mux            *http.ServeMux
+	heartbeat      HeartbeatConfig
+	allowedOrigins []string
+	turn           TURNConfig
+	logger         *slog.Logger
+
+	// ready reflects liveness for /readyz: false until New has finished
+	// wiring routes, and flipped back to false by SetNotReady during
+	// graceful shutdown so a load balancer stops sending new traffic here
+	// before the process actually exits.
+	ready atomic.Bool
 }
 
 // Option configures optional Server behavior at construction time.
@@ -51,26 +63,80 @@ func WithHeartbeat(cfg HeartbeatConfig) Option {
 	return func(s *Server) { s.heartbeat = cfg }
 }
 
+// WithAllowedOrigins overrides the WebSocket origin allowlist. Production
+// call sites (cmd/fauxtist/main.go) resolve this once at startup via
+// ResolveAllowedOrigins and fail fast on an invalid configuration;
+// omitting this option (as most tests do) falls back to permissive
+// local-development origins.
+func WithAllowedOrigins(origins []string) Option {
+	return func(s *Server) { s.allowedOrigins = origins }
+}
+
+// WithTURNConfig overrides the ICE-config endpoint's TURN credential
+// settings.
+func WithTURNConfig(cfg TURNConfig) Option {
+	return func(s *Server) { s.turn = cfg }
+}
+
+// WithLogger overrides the structured logger used for request/connection
+// lifecycle events. Defaults to slog.Default().
+func WithLogger(logger *slog.Logger) Option {
+	return func(s *Server) { s.logger = logger }
+}
+
 // New builds a Server with routes registered.
 func New(h *hub.Hub, opts ...Option) *Server {
-	s := &Server{hub: h, mux: http.NewServeMux(), heartbeat: DefaultHeartbeatConfig()}
+	s := &Server{
+		hub:       h,
+		mux:       http.NewServeMux(),
+		heartbeat: DefaultHeartbeatConfig(),
+		turn:      DefaultTURNConfig(),
+		logger:    slog.Default(),
+	}
 	for _, opt := range opts {
 		opt(s)
 	}
+	if s.allowedOrigins == nil {
+		// Tests overwhelmingly construct a Server with New(h) alone; default
+		// to the same permissive local-dev behavior ResolveAllowedOrigins
+		// would give with no environment configured, rather than making
+		// every call site pass origins explicitly.
+		origins, err := ResolveAllowedOrigins()
+		if err != nil {
+			origins = localDevOrigins
+		}
+		s.allowedOrigins = origins
+	}
+
 	s.mux.HandleFunc("POST /api/rooms", s.createRoom)
 	s.mux.HandleFunc("/ws/room/{code}", s.joinRoom)
 	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+	s.mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if !s.ready.Load() {
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
 	if static, err := webui.FS(); err == nil {
 		s.mux.Handle("/", spaHandler(static))
 	}
+	s.ready.Store(true)
 	return s
 }
 
-// Handler exposes the mux (for httptest and main).
-func (s *Server) Handler() http.Handler { return s.mux }
+// SetNotReady flips /readyz to fail, for graceful shutdown: a load
+// balancer or health check should stop routing new traffic here before
+// the process actually stops accepting connections.
+func (s *Server) SetNotReady() { s.ready.Store(false) }
+
+// Handler exposes the mux, wrapped with baseline security headers (for
+// httptest and main).
+func (s *Server) Handler() http.Handler { return securityHeaders(s.mux) }
 
 type createRoomReq struct {
 	Name string `json:"name"`
@@ -116,9 +182,11 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 	code, playerID, token, err := s.hub.CreateRoom(name)
 	if err != nil {
 		if errors.Is(err, hub.ErrHubAtCapacity) {
+			s.logger.Warn("room creation rejected: hub at capacity")
 			writeJSONError(w, http.StatusServiceUnavailable, "capacity_reached", "the server is at capacity, please try again shortly")
 			return
 		}
+		s.logger.Error("room creation failed", "error", err)
 		writeJSONError(w, http.StatusInternalServerError, "internal_error", "could not create room")
 		return
 	}
@@ -135,7 +203,7 @@ func (s *Server) joinRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		OriginPatterns: allowedOrigins(),
+		OriginPatterns: s.allowedOrigins,
 	})
 	if err != nil {
 		return
@@ -168,7 +236,7 @@ func (s *Server) joinRoom(w http.ResponseWriter, r *http.Request) {
 	go result.Client.WriteLoopForServer(connCtx)
 	go runHeartbeat(connCtx, conn, s.heartbeat)
 	defer rm.Leave(result.PlayerID, result.ConnID)
-	readLoop(ctx, conn, rm, result.PlayerID, result.ConnID)
+	readLoop(ctx, conn, rm, result.PlayerID, result.ConnID, s.turn)
 }
 
 // readJoinFrame blocks for the initial WS frame and parses it into a join
@@ -241,19 +309,6 @@ func sendJoinError(ctx context.Context, conn *websocket.Conn, err error) {
 	writeControlError(ctx, conn, err.Error(), room.JoinErrorCode(err))
 }
 
-// allowedOrigins restricts WebSocket upgrades to the deployed host when
-// RENDER_EXTERNAL_HOSTNAME (set automatically by Render) or ALLOWED_ORIGIN is
-// present; otherwise it allows all origins for local development.
-func allowedOrigins() []string {
-	if h := os.Getenv("RENDER_EXTERNAL_HOSTNAME"); h != "" {
-		return []string{h}
-	}
-	if o := os.Getenv("ALLOWED_ORIGIN"); o != "" {
-		return []string{o}
-	}
-	return []string{"*"}
-}
-
 // spaHandler serves embedded static files, falling back to index.html for
 // paths that do not map to a file (single-page app client routes).
 func spaHandler(static fs.FS) http.Handler {
@@ -285,7 +340,13 @@ func trimLeadingSlash(p string) string {
 // message — safety just means never panicking on it, not treating it as
 // fatal. Per-message-type semantic validation (stroke bounds, chat length,
 // etc.) happens once the room actor itself unmarshals the payload.
-func readLoop(ctx context.Context, conn *websocket.Conn, rm *room.Room, id game.PlayerID, connID uint64) {
+func readLoop(ctx context.Context, conn *websocket.Conn, rm *room.Room, id game.PlayerID, connID uint64, turnCfg TURNConfig) {
+	// A dedicated, generous-but-bounded limiter for ice_config_request:
+	// it depends on no room state, so it's answered directly here rather
+	// than via the room actor, and a client repeatedly asking for it
+	// (e.g. retrying voice) must not be able to churn HMAC computations
+	// unbounded.
+	iceLimiter := rate.NewLimiter(rate.Every(5*time.Second), 3)
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {
@@ -301,8 +362,30 @@ func readLoop(ctx context.Context, conn *websocket.Conn, rm *room.Room, id game.
 		if wsproto.ValidateEnvelope(env) != nil {
 			continue
 		}
+		if env.Type == wsproto.TypeIceConfigRequest {
+			if iceLimiter.Allow() {
+				writeIceConfig(ctx, conn, turnCfg)
+			}
+			continue
+		}
 		rm.Submit(id, connID, env)
 	}
+}
+
+// writeIceConfig answers one ice_config_request directly on the
+// connection. Safe to call concurrently with the connection's own write
+// pump and the heartbeat's Ping calls — nhooyr's Conn permits concurrent
+// calls to every method except Reader/Read.
+func writeIceConfig(ctx context.Context, conn *websocket.Conn, cfg TURNConfig) {
+	env, err := wsproto.Encode(wsproto.TypeIceConfig, wsproto.IceConfigPayload{IceServers: buildIceServers(cfg, time.Now())})
+	if err != nil {
+		return
+	}
+	b, err := json.Marshal(env)
+	if err != nil {
+		return
+	}
+	_ = conn.Write(ctx, websocket.MessageText, b)
 }
 
 // decodeEnvelope parses exactly one JSON object as a wsproto.Envelope,
