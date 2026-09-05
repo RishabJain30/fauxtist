@@ -53,6 +53,18 @@ func (r *Room) playerViews() []wsproto.PlayerView {
 	return views
 }
 
+// playerView returns one player's current merged view (engine identity +
+// room presence), or nil if they're not on the roster. Used to build the
+// snapshot's "you" field.
+func (r *Room) playerView(id game.PlayerID) *wsproto.PlayerView {
+	for _, v := range r.playerViews() {
+		if v.ID == string(id) {
+			return &v
+		}
+	}
+	return nil
+}
+
 // markConnected records a seat as connected: on its first-ever join, this
 // assigns its permanent joinSeq; on a later reconnect, it cancels any
 // pending grace timer and restores full participation. Must only run on the

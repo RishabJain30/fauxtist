@@ -26,7 +26,7 @@ func TestPlayerEmojiRoundTrips(t *testing.T) {
 	c := dialJoin(t, wsURL, wsproto.JoinPayload{Name: "Zoe", Emoji: "🦊"})
 	defer c.Close(websocket.StatusNormalClosure, "")
 
-	env := readUntil(t, c, wsproto.TypeRoomState)
+	env := readUntil(t, c, wsproto.TypeStateSnapshot)
 	var p map[string]any
 	_ = json.Unmarshal(env.Payload, &p)
 	players, _ := p["players"].([]any)
@@ -41,6 +41,6 @@ func TestPlayerEmojiRoundTrips(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("Zoe not found in room_state players: %v", players)
+		t.Fatalf("Zoe not found in state_snapshot players: %v", players)
 	}
 }

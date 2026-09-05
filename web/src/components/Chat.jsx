@@ -1,6 +1,6 @@
 import { useState } from 'react'
 
-export default function Chat({ state, send, canEndDiscussion, onEnd }) {
+export default function Chat({ state, send, canEndDiscussion, onEnd, disabled }) {
   const [text, setText] = useState('')
   const submit = (e) => {
     e.preventDefault()
@@ -24,10 +24,10 @@ export default function Chat({ state, send, canEndDiscussion, onEnd }) {
         {state.chat.length === 0 && <p className="muted">Say something — call out who seemed lost.</p>}
       </div>
       <form className="row" onSubmit={submit}>
-        <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Type a message…" style={{ flex: 1 }} />
-        <button type="submit">Send</button>
+        <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Type a message…" style={{ flex: 1 }} disabled={disabled} />
+        <button type="submit" disabled={disabled}>Send</button>
       </form>
-      {canEndDiscussion && <button className="btn-primary" onClick={onEnd}>Start voting →</button>}
+      {canEndDiscussion && <button className="btn-primary" onClick={onEnd} disabled={disabled}>Start voting →</button>}
     </div>
   )
 }

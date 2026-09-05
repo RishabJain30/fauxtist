@@ -32,7 +32,7 @@ func TestEncodeServerMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if string(b) != `{"type":"phase_changed","payload":{"phase":"voting"}}` {
+	if string(b) != `{"version":1,"type":"phase_changed","payload":{"phase":"voting"}}` {
 		t.Fatalf("unexpected json: %s", b)
 	}
 }

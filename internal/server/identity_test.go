@@ -140,7 +140,7 @@ func TestGuessedHostIDDoesNotClaimHostAccess(t *testing.T) {
 	// The real host's credentials must still work afterward.
 	real := dialJoin(t, wsURL, wsproto.JoinPayload{PlayerID: cr.PlayerID, ReconnectToken: cr.ReconnectToken})
 	defer real.CloseNow()
-	env := readUntil(t, real, wsproto.TypeRoomState)
+	env := readUntil(t, real, wsproto.TypeStateSnapshot)
 	var p map[string]any
 	_ = json.Unmarshal(env.Payload, &p)
 	if p["hostId"] != cr.PlayerID {
@@ -160,7 +160,7 @@ func TestGuessedPlayerIDDoesNotClaimSeat(t *testing.T) {
 	bob := dialJoin(t, wsURL, wsproto.JoinPayload{Name: "Bob"})
 	defer bob.CloseNow()
 	_ = readUntil(t, bob, wsproto.TypeJoinAccepted)
-	_ = readUntil(t, bob, wsproto.TypeRoomState)
+	_ = readUntil(t, bob, wsproto.TypeStateSnapshot)
 
 	guessed := dialJoin(t, wsURL, wsproto.JoinPayload{
 		PlayerID:       cr.Code + "-Bob", // the old, guessable scheme
@@ -214,7 +214,7 @@ func TestReconnectPreservesHostStatusScoreAndSeat(t *testing.T) {
 
 	host := dialJoin(t, wsURL, wsproto.JoinPayload{PlayerID: cr.PlayerID, ReconnectToken: cr.ReconnectToken})
 	defer host.CloseNow()
-	_ = readUntil(t, host, wsproto.TypeRoomState)
+	_ = readUntil(t, host, wsproto.TypeStateSnapshot)
 
 	conns := map[string]*websocket.Conn{cr.PlayerID: host}
 	var voteTarget string
@@ -229,7 +229,7 @@ func TestReconnectPreservesHostStatusScoreAndSeat(t *testing.T) {
 		if voteTarget == "" {
 			voteTarget = pid
 		}
-		_ = readUntil(t, c, wsproto.TypeRoomState)
+		_ = readUntil(t, c, wsproto.TypeStateSnapshot)
 	}
 	time.Sleep(150 * time.Millisecond)
 
@@ -247,7 +247,7 @@ func TestReconnectPreservesHostStatusScoreAndSeat(t *testing.T) {
 	host.CloseNow()
 	host2 := dialJoin(t, wsURL, wsproto.JoinPayload{PlayerID: cr.PlayerID, ReconnectToken: cr.ReconnectToken})
 	defer host2.CloseNow()
-	env := readUntil(t, host2, wsproto.TypeRoomState)
+	env := readUntil(t, host2, wsproto.TypeStateSnapshot)
 	var p map[string]any
 	_ = json.Unmarshal(env.Payload, &p)
 
@@ -268,7 +268,7 @@ func TestReconnectPreservesHostStatusScoreAndSeat(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatal("host seat missing from post-reconnect room_state")
+		t.Fatal("host seat missing from post-reconnect state_snapshot")
 	}
 
 	// Host privileges must still work post-reconnect.
@@ -293,7 +293,7 @@ func TestDuplicateNamesRejectedCaseInsensitively(t *testing.T) {
 	_ = json.Unmarshal(accepted.Payload, &ap)
 	aliceID, _ := ap["playerId"].(string)
 	aliceToken, _ := ap["reconnectToken"].(string)
-	_ = readUntil(t, alice, wsproto.TypeRoomState)
+	_ = readUntil(t, alice, wsproto.TypeStateSnapshot)
 
 	for _, variant := range []string{"alice", "ALICE", "AliCe"} {
 		dupe := dialJoin(t, wsURL, wsproto.JoinPayload{Name: variant})
@@ -307,7 +307,7 @@ func TestDuplicateNamesRejectedCaseInsensitively(t *testing.T) {
 	// The original Alice can still reconnect with her real credentials.
 	reconnected := dialJoin(t, wsURL, wsproto.JoinPayload{PlayerID: aliceID, ReconnectToken: aliceToken})
 	defer reconnected.CloseNow()
-	env := readUntil(t, reconnected, wsproto.TypeRoomState)
+	env := readUntil(t, reconnected, wsproto.TypeStateSnapshot)
 	var p map[string]any
 	_ = json.Unmarshal(env.Payload, &p)
 	players, _ := p["players"].([]any)
@@ -343,7 +343,8 @@ func TestReconnectFrameIgnoresStrayNameField(t *testing.T) {
 	defer c.CloseNow()
 
 	raw := map[string]any{
-		"type": wsproto.TypeJoin,
+		"version": wsproto.ProtocolVersion,
+		"type":    wsproto.TypeJoin,
 		"payload": map[string]any{
 			"playerId":       cr.PlayerID,
 			"reconnectToken": cr.ReconnectToken,
@@ -355,7 +356,7 @@ func TestReconnectFrameIgnoresStrayNameField(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	env := readUntil(t, c, wsproto.TypeRoomState)
+	env := readUntil(t, c, wsproto.TypeStateSnapshot)
 	var p map[string]any
 	_ = json.Unmarshal(env.Payload, &p)
 	players, _ := p["players"].([]any)

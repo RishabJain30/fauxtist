@@ -1,45 +1,47 @@
 import { useEffect, useRef, useReducer, useCallback, useState } from 'react'
-import { reduce, initialState, LOCAL_JOIN_FAILED } from './reducer.js'
-import { T } from './protocol.js'
+import { reduce, initialState } from './reducer.js'
+import { createRoomConnection } from './roomConnection.js'
 
+// useRoomSocket is a thin React wrapper around one createRoomConnection
+// instance: it owns the React state/reducer this hook exposes and starts/
+// stops a fresh connection whenever `code`/`join` change, but the actual
+// WebSocket lifecycle (connecting, backoff, sequencing, credential reuse)
+// lives entirely in roomConnection.js, framework-agnostic and unit-tested
+// on its own.
 export function useRoomSocket(code, join) {
   const [state, dispatch] = useReducer(reduce, undefined, initialState)
   const [identity, setIdentity] = useState(null)
-  const wsRef = useRef(null)
+  const [connectionStatus, setConnectionStatus] = useState('connecting')
+  const connRef = useRef(null)
   const subsRef = useRef(new Set())
 
   useEffect(() => {
     if (!code || !join) return
     setIdentity(null)
-    let gotRoomState = false
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-    const ws = new WebSocket(`${proto}://${location.host}/ws/room/${code}`)
-    wsRef.current = ws
-    ws.onopen = () => ws.send(JSON.stringify({ type: 'join', payload: join }))
-    ws.onmessage = (e) => {
-      let msg
-      try { msg = JSON.parse(e.data) } catch { return }
-      if (msg.type === T.JoinAccepted) {
-        const p = msg.payload || {}
-        setIdentity({ playerId: p.playerId, reconnectToken: p.reconnectToken })
-      }
-      if (msg.type === T.RoomState) gotRoomState = true
-      dispatch(msg)
-      subsRef.current.forEach((fn) => fn(msg))
+    setConnectionStatus('connecting')
+
+    const conn = createRoomConnection(code, join, {
+      onStatus: setConnectionStatus,
+      onIdentity: setIdentity,
+      // Every dispatched action (server envelope or local signal) both
+      // updates the reducer and fans out to subscribe()rs — useVoice.js
+      // is the one other consumer, reading raw envelopes for its own
+      // independent voice_* protocol alongside the reducer.
+      onDispatch: (action) => {
+        dispatch(action)
+        subsRef.current.forEach((fn) => fn(action))
+      },
+    })
+    connRef.current = conn
+
+    return () => {
+      conn.stop()
+      if (connRef.current === conn) connRef.current = null
     }
-    ws.onclose = () => {
-      // The server closes the connection right after a rejected join or
-      // reconnect (see room.JoinErrorCode) — if we never got as far as a
-      // room_state snapshot, this close means the join failed outright,
-      // not a mid-game network drop.
-      if (!gotRoomState) dispatch({ type: LOCAL_JOIN_FAILED })
-    }
-    return () => ws.close()
   }, [code, join])
 
   const send = useCallback((type, payload = {}) => {
-    const ws = wsRef.current
-    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type, payload }))
+    connRef.current?.send(type, payload)
   }, [])
 
   const subscribe = useCallback((fn) => {
@@ -47,5 +49,5 @@ export function useRoomSocket(code, join) {
     return () => subsRef.current.delete(fn)
   }, [])
 
-  return { state, send, subscribe, identity }
+  return { state, send, subscribe, identity, connectionStatus }
 }

@@ -130,7 +130,7 @@ func setupGame(t *testing.T, srv *httptest.Server) (*websocket.Conn, map[string]
 	conns := map[string]*websocket.Conn{}
 	host := dialJoin(t, wsURL, wsproto.JoinPayload{PlayerID: cr.PlayerID, ReconnectToken: cr.ReconnectToken})
 	conns[cr.PlayerID] = host
-	_ = readUntil(t, host, wsproto.TypeRoomState) // drain the host's initial snapshot
+	_ = readUntil(t, host, wsproto.TypeStateSnapshot) // drain the host's initial snapshot
 
 	var voteTarget string
 	for _, n := range []string{"N1", "N2", "N3"} {
@@ -146,7 +146,7 @@ func setupGame(t *testing.T, srv *httptest.Server) (*websocket.Conn, map[string]
 		if voteTarget == "" {
 			voteTarget = pid
 		}
-		_ = readUntil(t, c, wsproto.TypeRoomState) // drain each joiner's snapshot
+		_ = readUntil(t, c, wsproto.TypeStateSnapshot) // drain each joiner's snapshot
 	}
 	time.Sleep(150 * time.Millisecond) // let all four register
 	return host, conns, voteTarget

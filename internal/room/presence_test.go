@@ -45,7 +45,7 @@ func joinNewPlayer(t *testing.T, r *Room, name string) testPlayer {
 	if !found {
 		t.Fatal("never saw join_accepted")
 	}
-	drainUntilRoomState(t, client)
+	drainUntilStateSnapshot(t, client)
 	return testPlayer{conn: client, playerID: res.PlayerID, connID: res.ConnID, token: token}
 }
 
@@ -53,7 +53,7 @@ func reconnectPlayer(t *testing.T, r *Room, tp testPlayer) testPlayer {
 	t.Helper()
 	client, conn := dialTestConn(t)
 	res := joinAndPump(t, r, conn, JoinRequest{Reconnect: true, PlayerID: tp.playerID, Token: tp.token})
-	drainUntilRoomState(t, client)
+	drainUntilStateSnapshot(t, client)
 	return testPlayer{conn: client, playerID: res.PlayerID, connID: res.ConnID, token: tp.token}
 }
 
@@ -63,18 +63,18 @@ func disconnect(r *Room, tp testPlayer) {
 	r.Leave(tp.playerID, tp.connID)
 }
 
-// drainUntilRoomState reads and discards frames until a room_state arrives
+// drainUntilStateSnapshot reads and discards frames until a state_snapshot arrives
 // (skipping e.g. host_changed/presence/lobby_update noise), matching the
 // readUntil helper already used by internal/server's tests.
-func drainUntilRoomState(t *testing.T, c *websocket.Conn) {
+func drainUntilStateSnapshot(t *testing.T, c *websocket.Conn) {
 	t.Helper()
 	for i := 0; i < 20; i++ {
 		env := readEnvelope(t, c)
-		if env.Type == wsproto.TypeRoomState {
+		if env.Type == wsproto.TypeStateSnapshot {
 			return
 		}
 	}
-	t.Fatal("never saw room_state")
+	t.Fatal("never saw state_snapshot")
 }
 
 // readUntilType reads frames off c until one of type typ arrives, within an
@@ -126,7 +126,7 @@ func joinFourAndStart(t *testing.T, r *Room, hostID game.PlayerID, hostToken str
 	t.Helper()
 	client1, conn1 := dialTestConn(t)
 	res1 := joinAndPump(t, r, conn1, JoinRequest{Reconnect: true, PlayerID: hostID, Token: hostToken})
-	drainUntilRoomState(t, client1)
+	drainUntilStateSnapshot(t, client1)
 	host := testPlayer{conn: client1, playerID: hostID, connID: res1.ConnID, token: hostToken}
 
 	players := []testPlayer{host, joinNewPlayer(t, r, "P2"), joinNewPlayer(t, r, "P3"), joinNewPlayer(t, r, "P4")}
@@ -147,7 +147,7 @@ func TestReconnectWithinGracePreservesSeatAndHostStatus(t *testing.T) {
 	startTestRoom(t, r)
 	client1, conn1 := dialTestConn(t)
 	res1 := joinAndPump(t, r, conn1, JoinRequest{Reconnect: true, PlayerID: hostID, Token: hostToken})
-	drainUntilRoomState(t, client1)
+	drainUntilStateSnapshot(t, client1)
 	host := testPlayer{playerID: hostID, connID: res1.ConnID, token: hostToken}
 	// A bystander who stays connected throughout, to observe broadcasts
 	// about the host — the host's own connection is removed from the
@@ -179,7 +179,7 @@ func TestStaleGraceTimerCannotRemoveReconnectedPlayer(t *testing.T) {
 	startTestRoom(t, r)
 	client1, conn1 := dialTestConn(t)
 	res1 := joinAndPump(t, r, conn1, JoinRequest{Reconnect: true, PlayerID: hostID, Token: hostToken})
-	drainUntilRoomState(t, client1)
+	drainUntilStateSnapshot(t, client1)
 	host := testPlayer{playerID: hostID, connID: res1.ConnID, token: hostToken}
 
 	disconnect(r, host)
@@ -211,7 +211,7 @@ func TestDisconnectedLobbyPlayerRemovedAfterGrace(t *testing.T) {
 	startTestRoom(t, r)
 	client1, conn1 := dialTestConn(t)
 	joinAndPump(t, r, conn1, JoinRequest{Reconnect: true, PlayerID: hostID, Token: hostToken})
-	drainUntilRoomState(t, client1)
+	drainUntilStateSnapshot(t, client1)
 
 	bob := joinNewPlayer(t, r, "Bob")
 	disconnect(r, bob)
@@ -236,7 +236,7 @@ func TestHostDoesNotMigrateDuringGrace(t *testing.T) {
 	startTestRoom(t, r)
 	client1, conn1 := dialTestConn(t)
 	res1 := joinAndPump(t, r, conn1, JoinRequest{Reconnect: true, PlayerID: hostID, Token: hostToken})
-	drainUntilRoomState(t, client1)
+	drainUntilStateSnapshot(t, client1)
 	host := testPlayer{playerID: hostID, connID: res1.ConnID, token: hostToken}
 
 	_ = joinNewPlayer(t, r, "Bob")
@@ -257,7 +257,7 @@ func TestHostMigratesDeterministicallyAfterGrace(t *testing.T) {
 	startTestRoom(t, r)
 	client1, conn1 := dialTestConn(t)
 	res1 := joinAndPump(t, r, conn1, JoinRequest{Reconnect: true, PlayerID: hostID, Token: hostToken})
-	drainUntilRoomState(t, client1)
+	drainUntilStateSnapshot(t, client1)
 	host := testPlayer{playerID: hostID, connID: res1.ConnID, token: hostToken}
 
 	// Bob joins before Carla — Bob has the earlier joinSeq among the two.
@@ -327,7 +327,7 @@ func TestNoConnectedReplacementHostDoesNotPanic(t *testing.T) {
 	startTestRoom(t, r)
 	client1, conn1 := dialTestConn(t)
 	res1 := joinAndPump(t, r, conn1, JoinRequest{Reconnect: true, PlayerID: hostID, Token: hostToken})
-	drainUntilRoomState(t, client1)
+	drainUntilStateSnapshot(t, client1)
 	host := testPlayer{playerID: hostID, connID: res1.ConnID, token: hostToken}
 
 	disconnect(r, host) // the ONLY player disconnects; nobody left to promote

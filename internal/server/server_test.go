@@ -46,7 +46,7 @@ func readEnv(t *testing.T, c *websocket.Conn) wsproto.Envelope {
 	return env
 }
 
-func TestJoinReceivesRoomState(t *testing.T) {
+func TestJoinReceivesStateSnapshot(t *testing.T) {
 	h := hub.New()
 	srv := httptest.NewServer(New(h).Handler())
 	defer srv.Close()
@@ -74,8 +74,8 @@ func TestJoinReceivesRoomState(t *testing.T) {
 		t.Fatalf("first message type = %q, want join_accepted", env.Type)
 	}
 	env = readEnv(t, c)
-	if env.Type != wsproto.TypeRoomState {
-		t.Fatalf("second message type = %q, want room_state", env.Type)
+	if env.Type != wsproto.TypeStateSnapshot {
+		t.Fatalf("second message type = %q, want state_snapshot", env.Type)
 	}
 }
 
@@ -95,7 +95,7 @@ func TestStrokeBroadcastsToAllClients(t *testing.T) {
 	b := dial(t, wsURL, "Bob")
 	defer b.Close(websocket.StatusNormalClosure, "")
 
-	// Drain each client's join_accepted + initial room_state frames.
+	// Drain each client's join_accepted + initial state_snapshot frames.
 	_ = readEnv(t, a)
 	_ = readEnv(t, a)
 	_ = readEnv(t, b)
@@ -161,7 +161,7 @@ func TestJoinRejectedWhenRoomFull(t *testing.T) {
 	for i := 0; i < 7; i++ {
 		c := dial(t, wsURL, "P"+string(rune('a'+i)))
 		conns = append(conns, c)
-		_ = readEnv(t, c) // drain room_state
+		_ = readEnv(t, c) // drain state_snapshot
 	}
 	defer func() {
 		for _, c := range conns {

@@ -46,7 +46,7 @@ func TestVoiceSignalRelayedToTarget(t *testing.T) {
 
 	a := dialJoin(t, wsURL, wsproto.JoinPayload{PlayerID: cr.PlayerID, ReconnectToken: cr.ReconnectToken})
 	defer a.Close(websocket.StatusNormalClosure, "")
-	_ = readUntil(t, a, wsproto.TypeRoomState)
+	_ = readUntil(t, a, wsproto.TypeStateSnapshot)
 	aID := cr.PlayerID
 
 	b := dialJoin(t, wsURL, wsproto.JoinPayload{Name: "B"})
@@ -55,7 +55,7 @@ func TestVoiceSignalRelayedToTarget(t *testing.T) {
 	var ap map[string]any
 	_ = json.Unmarshal(accepted.Payload, &ap)
 	bID, _ := ap["playerId"].(string)
-	_ = readUntil(t, b, wsproto.TypeRoomState)
+	_ = readUntil(t, b, wsproto.TypeStateSnapshot)
 
 	time.Sleep(100 * time.Millisecond)
 

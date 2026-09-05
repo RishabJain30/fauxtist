@@ -1,7 +1,7 @@
 import Canvas from './Canvas.jsx'
 
-export default function GameBoard({ state, meId, send }) {
-  const myTurn = state.currentPlayer === meId && state.phase === 'drawing'
+export default function GameBoard({ state, meId, send, disabled }) {
+  const myTurn = state.currentPlayer === meId && state.phase === 'drawing' && !disabled
   const drawer = state.players.find((p) => p.id === state.currentPlayer)
   const miniAvatar = { width: 26, height: 26, fontSize: 15, borderRadius: 8 }
 

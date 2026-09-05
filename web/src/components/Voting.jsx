@@ -1,8 +1,9 @@
 import { useState } from 'react'
 
-export default function Voting({ state, meId, send }) {
-  const [voted, setVoted] = useState(null)
-  const cast = (target) => { send('cast_vote', { target }); setVoted(target) }
+export default function Voting({ state, meId, send, disabled }) {
+  const [picked, setPicked] = useState(null)
+  const voted = state.hasVoted
+  const cast = (target) => { send('cast_vote', { target }); setPicked(target) }
 
   return (
     <div className="card col pop-in">
@@ -11,22 +12,22 @@ export default function Voting({ state, meId, send }) {
       <div className="col" style={{ gap: 10 }}>
         {state.players.map((p) => {
           const isMe = p.id === meId
-          const picked = voted === p.id
+          const isPicked = picked === p.id
           return (
             <button
               key={p.id}
               className="player"
-              disabled={!!voted || isMe}
+              disabled={disabled || voted || isMe}
               onClick={() => cast(p.id)}
               style={{
                 justifyContent: 'flex-start',
-                background: picked ? 'var(--amber)' : '#fff',
+                background: isPicked ? 'var(--amber)' : '#fff',
                 color: 'var(--ink)', fontSize: 18,
                 opacity: p.connected === false ? 0.5 : 1,
               }}
             >
               <span className="avatar">{p.emoji || '🎭'}</span>
-              {p.name}{isMe ? ' (you)' : ''}{picked ? ' ✓' : ''}
+              {p.name}{isMe ? ' (you)' : ''}{isPicked ? ' ✓' : ''}
               {p.connected === false && <span className="muted"> (reconnecting…)</span>}
             </button>
           )
