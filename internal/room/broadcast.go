@@ -104,6 +104,11 @@ func (r *Room) broadcastEvent(ev game.Event) {
 			// just be a redundant duplicate send.
 			r.evaluateGuessDeadline()
 			if res := r.engine.State().LastResult; res != nil && res.Caught {
+				// A second distinct, ordered message within this one
+				// PhaseChanged event — give it its own revision (see
+				// applyEvents) so a real client's sequencer doesn't drop it
+				// as a duplicate of the phase_changed just sent above.
+				r.revision++
 				r.broadcastRoundResult(*res)
 			}
 		}
@@ -311,9 +316,7 @@ func (r *Room) evaluateVoting() {
 	if env, err := wsproto.Encode(wsproto.TypeVoteUpdate, map[string]any{"votesCast": cast, "votesTotal": total}); err == nil {
 		r.broadcast(env)
 	}
-	for _, ev := range r.engine.CheckVotingResolution(connected) {
-		r.broadcastEvent(ev)
-	}
+	r.applyEvents(r.engine.CheckVotingResolution(connected))
 }
 
 // buildSnapshot is the single authoritative builder for the canonical
