@@ -298,7 +298,7 @@ func TestFormerHostReconnectingDoesNotRegainOwnership(t *testing.T) {
 	// Advance the turn away from the host first, so only the
 	// reconnect/host-migration mechanism is exercised here, not the
 	// (separately tested) disconnected-drawer skip timer.
-	stroke, _ := wsproto.Encode(wsproto.TypeStroke, wsproto.StrokePayload{Points: []wsproto.Point{{X: 0.1, Y: 0.1}}})
+	stroke, _ := wsproto.Encode(wsproto.TypeStroke, wsproto.StrokePayload{Points: []wsproto.Point{{X: 0.1, Y: 0.1}}, Color: "#111", Width: 3})
 	r.Submit(host.playerID, host.connID, stroke)
 	for _, p := range players {
 		readUntilType(t, p.conn, wsproto.TypeTurnChanged, 2*time.Second)

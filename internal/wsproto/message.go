@@ -14,6 +14,12 @@ const ProtocolVersion = 1
 const (
 	CloseUnsupportedVersion = 4001
 	CloseInvalidEnvelope    = 4002
+	// CloseRoomClosed is sent when a room is torn down out from under a
+	// still-connected client: it expired from inactivity, or the process is
+	// shutting down. Distinct from a normal 1000 closure so the client's
+	// reconnect logic can recognize the room itself is gone rather than
+	// retrying against a socket that will never come back.
+	CloseRoomClosed = 4003
 )
 
 // Message type constants. Client->server and server->client share one namespace.
