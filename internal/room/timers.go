@@ -28,7 +28,13 @@ func (r *Room) handleGraceExpired(m graceExpiredMsg) {
 	}
 	pres.graceExpired = true
 	delete(r.graceTimers, m.playerID)
-	r.revision++ // grace expiring is always visible: a removal, a host migration, or at minimum a re-broadcast lobby view
+	// No revision bump here: broadcastPlayerLeft, maybeMigrateHost's own
+	// broadcastHostChanged, and the trailing broadcastLobby below each
+	// bump their own via broadcastSequenced — exactly once per envelope
+	// this function actually sends, never a batch pre-bump (see
+	// broadcastSequenced's doc). The trailing broadcastLobby always runs
+	// unconditionally, so grace expiring always advances the revision by
+	// at least one, whether or not a removal or migration also happened.
 
 	if r.engine.State().Phase == game.PhaseLobby {
 		if err := r.engine.RemovePlayer(m.playerID); err == nil {

@@ -168,7 +168,13 @@ func (r *Room) maybeMigrateHost() {
 		return
 	}
 	r.broadcastHostChanged(candidate)
-	r.broadcastLobby()
+	// Deliberately no broadcastLobby() here: both callers (markConnected,
+	// via processJoin, and handleGraceExpired) already send their own
+	// lobby_update immediately after calling this — the migrated host is
+	// already reflected there. A second one here would either double-send
+	// an identical lobby_update or, worse, share a revision with the
+	// caller's own broadcast if that bump ever moved (see
+	// broadcastSequenced's doc for why that must never happen).
 }
 
 func (r *Room) broadcastPresence(id game.PlayerID, connected bool) {
@@ -176,13 +182,13 @@ func (r *Room) broadcastPresence(id game.PlayerID, connected bool) {
 		ID: string(id), Connected: connected,
 	})
 	if err == nil {
-		r.broadcast(env)
+		r.broadcastSequenced(env)
 	}
 }
 
 func (r *Room) broadcastHostChanged(id game.PlayerID) {
 	env, err := wsproto.Encode(wsproto.TypeHostChanged, wsproto.HostChangedPayload{HostID: string(id)})
 	if err == nil {
-		r.broadcast(env)
+		r.broadcastSequenced(env)
 	}
 }

@@ -192,7 +192,11 @@ until it's explicitly shut down or the sweeper reaps it:
   client address (a small burst, then one every 10s) plus one modest
   global bucket, so a single script can't create enough rooms to exhaust
   `FAUXTIST_MAX_ROOMS` and lock out real players. A rejected request
-  returns `429` with `{"code": "rate_limited"}` and creates no room.
+  returns `429` with `{"code": "rate_limited"}` and creates no room. The
+  client address is derived by trusting exactly one reverse-proxy hop's
+  `X-Forwarded-For` contribution — Render's own edge, the only proxy this
+  process is ever deployed behind — not a client-supplied value, so a
+  script can't rotate through fake addresses to bypass its own bucket.
 - **Shutdown**: an expired or explicitly closed room cancels its timers
   and closes every connected client with close code `4003`
   (`room_closed` — see [docs/protocol.md](./docs/protocol.md#close-codes));

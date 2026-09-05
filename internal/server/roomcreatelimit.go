@@ -74,19 +74,39 @@ func (l *roomCreateLimiter) evictStale(now time.Time) {
 	}
 }
 
-// clientIP extracts the best-effort client address for rate-limiting
-// purposes: the leftmost X-Forwarded-For entry when present (Render's edge
-// proxy sets this), falling back to the direct connection's address. This
-// is a hint for spreading rate-limit buckets across distinct clients, not
-// a security boundary — a client can freely spoof X-Forwarded-For, which
-// only ever makes the limiter treat them as a different (still-limited)
-// bucket, never grants them extra trust.
+// trustedProxyHops is the number of reverse proxies in front of this
+// process whose X-Forwarded-For contribution can be trusted: exactly one
+// — Render's own edge (see render.yaml and README.md's deployment
+// section). This process is never deployed behind any other proxy.
+//
+// Each proxy a request passes through appends the address it observed to
+// X-Forwarded-For rather than replacing it, so the Nth-from-the-right
+// entry is the one that hop actually saw. An earlier version of clientIP
+// read the LEFTMOST entry instead — but that position is whatever the
+// original, unauthenticated client put there, in full: a script can set
+// X-Forwarded-For to a fresh fake address on every single request, and
+// Render's edge only ever appends its own observation after it, so the
+// leftmost entry is attacker-controlled start to finish. Reading it meant
+// the per-IP bucket below never accumulated against any one real address,
+// defeating the limiter entirely. Trusting exactly trustedProxyHops
+// entries from the right closes that gap: no matter what a client
+// prepends, only the value Render's edge itself appended is ever used.
+const trustedProxyHops = 1
+
+// clientIP extracts the client address the per-IP bucket below keys on,
+// trusting exactly trustedProxyHops proxy-appended X-Forwarded-For
+// entries from the right, or falling back to the direct connection's own
+// address (r.RemoteAddr, which nothing upstream of net/http can spoof) if
+// the header is absent, malformed, or too short to contain a
+// trusted-hop's entry at all.
 func clientIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if i := strings.IndexByte(xff, ','); i >= 0 {
-			return strings.TrimSpace(xff[:i])
+		parts := strings.Split(xff, ",")
+		if idx := len(parts) - trustedProxyHops; idx >= 0 {
+			if ip := strings.TrimSpace(parts[idx]); ip != "" {
+				return ip
+			}
 		}
-		return strings.TrimSpace(xff)
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
