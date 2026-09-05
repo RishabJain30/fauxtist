@@ -1,3 +1,19 @@
+# Render deploys this Docker web service automatically from `main`
+# (autoDeploy). The free plan is fine for demos: it spins down after
+# inactivity, which loses every in-memory room and adds a cold-start
+# delay to the next request. Switch `plan` to a paid always-on tier
+# yourself if you want reliable public gameplay — this file never
+# changes that for you.
+#
+# Render sets $PORT and forwards it to the container automatically; the
+# app already reads that env var (see cmd/fauxtist/main.go), so no
+# explicit port config is needed here.
+#
+# See README.md's "Environment variables" table for every variable and
+# its default. Only the two below need a value beyond that default for a
+# real deployment; both are left for manual entry in Render's dashboard
+# (sync: false) rather than committed here, since neither belongs in
+# version control.
 services:
   - type: web
     name: fauxtist
@@ -5,3 +21,12 @@ services:
     plan: free
     healthCheckPath: /healthz
     autoDeploy: true
+    envVars:
+      # Bare host (no scheme), e.g. play.example.com — required once you
+      # have a real custom domain; see README.md's Deployment section.
+      - key: FAUXTIST_ALLOWED_ORIGINS
+        sync: false
+      # Only needed if you're running a separate Coturn deployment for
+      # voice TURN relay — see docs/turn.md. Leave unset for STUN-only.
+      - key: FAUXTIST_TURN_SHARED_SECRET
+        sync: false

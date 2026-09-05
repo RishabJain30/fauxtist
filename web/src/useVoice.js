@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { T } from './protocol.js'
 
-const ICE = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
+// STUN_ONLY_ICE is the fallback used until (or unless) the server answers
+// an ice_config_request with something better, and whenever it can't —
+// TURN is an enhancement for restrictive NATs, never a requirement: voice
+// stays best-effort on STUN alone either way.
+const STUN_ONLY_ICE = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
 
 export function useVoice({ meId, send, subscribe }) {
   const [active, setActive] = useState(false)
@@ -17,6 +21,7 @@ export function useVoice({ meId, send, subscribe }) {
   const speakingRef = useRef(false)
   const audioCtx = useRef(null)
   const speakTimer = useRef(null)
+  const iceConfig = useRef(STUN_ONLY_ICE)
 
   const sendState = useCallback((m, sp) => send(T.VoiceState, { muted: m, speaking: sp }), [send])
 
@@ -30,7 +35,7 @@ export function useVoice({ meId, send, subscribe }) {
   const makePeer = useCallback((peerId) => {
     const existing = pcs.current.get(peerId)
     if (existing) return existing
-    const pc = new RTCPeerConnection(ICE)
+    const pc = new RTCPeerConnection(iceConfig.current)
     pcs.current.set(peerId, pc)
     if (localStream.current) {
       localStream.current.getTracks().forEach((t) => pc.addTrack(t, localStream.current))
@@ -88,6 +93,11 @@ export function useVoice({ meId, send, subscribe }) {
         case T.VoiceSignal:
           if (p.from) onSignal(p.from, p.kind, p.payload)
           break
+        case T.IceConfig:
+          if (Array.isArray(p.iceServers) && p.iceServers.length > 0) {
+            iceConfig.current = { iceServers: p.iceServers }
+          }
+          break
         default:
           break
       }
@@ -119,6 +129,12 @@ export function useVoice({ meId, send, subscribe }) {
 
   const enable = useCallback(async () => {
     if (activeRef.current) return
+    // Best-effort: ask for the current ICE configuration before any peer
+    // connection is created (that happens later, once VoiceJoin's response
+    // enumerates peers to call) — the mic prompt below gives the round
+    // trip time to land. If it doesn't, or the server has no TURN
+    // configured, iceConfig.current is still a valid STUN-only fallback.
+    send(T.IceConfigRequest, {})
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       stream.getAudioTracks().forEach((t) => (t.enabled = false))
