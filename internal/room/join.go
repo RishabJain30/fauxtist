@@ -120,12 +120,13 @@ func (r *Room) processJoin(j joinReq) {
 	}
 	r.clients[player.ID] = c
 	slog.Info("player connected", "room", r.Code, "player", player.ID, "reconnect", j.req.Reconnect)
-	// A join or reconnect always changes externally visible state (a new
-	// roster entry, or a presence flip visible in every client's player
-	// list) — bump once for the whole operation, before anything it
-	// triggers (presence, host migration, the lobby broadcast) sends.
-	r.revision++
 	r.touch()
+	// No revision bump here: markConnected and the broadcastLobby below
+	// each bump their own via broadcastSequenced, exactly once per
+	// envelope actually sent — see broadcastSequenced's doc for why a
+	// batch pre-bump like this used to be would create a revision number
+	// no message is ever stamped with, which a real client's sequencer
+	// sees as a gap and resyncs over unnecessarily.
 	r.markConnected(player.ID)
 
 	if isNew {
@@ -235,9 +236,11 @@ func (r *Room) processLeave(lv leaveReq) {
 		return
 	}
 	delete(r.clients, lv.playerID)
-	r.revision++ // presence flip, visible in every client's player list
 	r.touch()
 	slog.Info("player disconnected", "room", r.Code, "player", lv.playerID)
+	// No revision bump here — markDisconnected's own broadcastPresence
+	// (via broadcastSequenced) bumps for the presence flip; see the
+	// comment on that path in processJoin above.
 	if r.voicePresent[lv.playerID] {
 		delete(r.voicePresent, lv.playerID)
 		r.broadcastVoicePeerLeft(lv.playerID)

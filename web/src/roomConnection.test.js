@@ -362,6 +362,59 @@ describe('createRoomConnection', () => {
     conn.stop()
   })
 
+  // --- Lifecycle broadcasts outside applyEvents (room.go: processJoin,
+  // processLeave, markConnected, markDisconnected, evaluateVoting,
+  // maybeMigrateHost, handleGraceExpired). These used to share one
+  // pre-bumped seq across several distinct broadcasts sent back to back —
+  // the same class of bug as the engine-event cascades above, just in a
+  // different set of call sites. Envelope seq values below mirror exactly
+  // what the fixed server now sends (see internal/room/sequencing_test.go's
+  // TestSequencingInvariant_NonResolvingVotingDisconnect and
+  // TestSequencingInvariant_HostMigrationOnGraceExpiry for the server-side
+  // half of this same regression coverage). ---
+
+  it('applies both the presence change and the vote_update when a voter disconnects without resolving the vote', () => {
+    const conn = setUp()
+    const ws = FakeWebSocket.instances[0]
+    ws.open()
+    ws.message(snapshotEnvelope(1, {
+      phase: 'voting', players: [], hostId: 'host-1', votesCast: 0, votesTotal: 4,
+    }))
+
+    ws.message({ type: T.PlayerPresenceChanged, seq: 2, payload: { id: 'p4', connected: false } })
+    ws.message({ type: T.VoteUpdate, seq: 3, payload: { votesCast: 0, votesTotal: 3 } })
+
+    const presence = dispatched.find((a) => a.type === T.PlayerPresenceChanged)
+    const voteUpdate = dispatched.find((a) => a.type === T.VoteUpdate)
+    expect(presence).toBeTruthy()
+    expect(voteUpdate).toBeTruthy() // was silently dropped as a duplicate of presence.seq before the fix
+    expect(voteUpdate.payload).toEqual({ votesCast: 0, votesTotal: 3 })
+    conn.stop()
+  })
+
+  it('applies player_left, host_changed, and lobby_update in order when the lobby host is replaced', () => {
+    const conn = setUp()
+    const ws = FakeWebSocket.instances[0]
+    ws.open()
+    ws.message(snapshotEnvelope(1, {
+      phase: 'lobby', players: [{ id: 'host-1', connected: false }, { id: 'bob', connected: true }], hostId: 'host-1',
+    }))
+
+    ws.message({ type: T.PlayerLeft, seq: 2, payload: { id: 'host-1' } })
+    ws.message({ type: T.HostChanged, seq: 3, payload: { hostId: 'bob' } })
+    ws.message({ type: T.LobbyUpdate, seq: 4, payload: { players: [{ id: 'bob', connected: true }], hostId: 'bob' } })
+
+    const playerLeft = dispatched.find((a) => a.type === T.PlayerLeft)
+    const hostChanged = dispatched.find((a) => a.type === T.HostChanged)
+    const lobbyUpdate = dispatched.find((a) => a.type === T.LobbyUpdate)
+    expect(playerLeft).toBeTruthy()
+    expect(hostChanged).toBeTruthy() // was silently dropped as a duplicate of player_left.seq before the fix
+    expect(lobbyUpdate).toBeTruthy() // was silently dropped as a duplicate of host_changed.seq before the fix
+    expect(hostChanged.payload).toEqual({ hostId: 'bob' })
+    expect(lobbyUpdate.payload.hostId).toBe('bob')
+    conn.stop()
+  })
+
   // --- StrictMode-style double start/stop safety ---
   // Simulates React StrictMode's deliberate mount -> cleanup -> mount:
   // the first instance must be fully inert after stop(), so nothing it

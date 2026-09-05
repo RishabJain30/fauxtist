@@ -28,6 +28,34 @@ func (r *Room) broadcast(env wsproto.Envelope) {
 	}
 }
 
+// broadcastSequenced bumps the room's revision, then broadcasts env at
+// that new revision. This is the room's protocol rule for every SEQUENCED
+// (see web/src/protocol.js's SEQUENCED_TYPES) lifecycle message that
+// broadcasts a single shared envelope outside an engine-event cascade —
+// player_presence_changed, host_changed, lobby_update, player_left, and
+// the standalone vote_update evaluateVoting sends when a presence change
+// doesn't resolve voting. Calling this instead of a bare r.broadcast, and
+// never pre-bumping the revision for a batch of subsequent calls, is what
+// guarantees two distinct messages delivered back to back to the same
+// client never share a seq, and that the room's revision never skips a
+// number no message was ever sent at (which a real client's sequencer
+// would otherwise see as a gap and trigger an unnecessary resync over).
+//
+// This is one of exactly two places r.revision is ever mutated: the other
+// is applyEvents, which bumps once per engine event in a cascaded
+// transition (StartGame, a stroke, a vote resolving, ...) — plus the one
+// narrow exception inside broadcastEvent's PhaseChanged case, which bumps
+// manually immediately before its own per-client-redacted broadcastRoundResult
+// call for the same reason (that call has no single shared envelope to pass
+// through this helper). Every other call site broadcasting a SEQUENCED_TYPES
+// message must route through one of these three, never touch r.revision
+// directly, and never bump before calling this if it doesn't intend to
+// broadcast the very next envelope.
+func (r *Room) broadcastSequenced(env wsproto.Envelope) {
+	r.revision++
+	r.broadcast(env)
+}
+
 // sendTo sends an envelope to one client if present.
 func (r *Room) sendTo(id game.PlayerID, env wsproto.Envelope) {
 	if c, ok := r.clients[id]; ok {
@@ -181,7 +209,7 @@ func (r *Room) broadcastLobby() {
 		"hostId":  string(s.HostID),
 	})
 	if err == nil {
-		r.broadcast(env)
+		r.broadcastSequenced(env)
 	}
 }
 
@@ -192,7 +220,7 @@ func (r *Room) broadcastLobby() {
 func (r *Room) broadcastPlayerLeft(id game.PlayerID) {
 	env, err := wsproto.Encode(wsproto.TypePlayerLeft, map[string]any{"id": string(id)})
 	if err == nil {
-		r.broadcast(env)
+		r.broadcastSequenced(env)
 	}
 }
 
@@ -314,7 +342,7 @@ func (r *Room) evaluateVoting() {
 	connected := r.connectedSet()
 	cast, total := r.engine.VotingProgress(connected)
 	if env, err := wsproto.Encode(wsproto.TypeVoteUpdate, map[string]any{"votesCast": cast, "votesTotal": total}); err == nil {
-		r.broadcast(env)
+		r.broadcastSequenced(env)
 	}
 	r.applyEvents(r.engine.CheckVotingResolution(connected))
 }
