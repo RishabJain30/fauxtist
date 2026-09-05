@@ -67,7 +67,11 @@ func validateEmoji(raw string) (string, error) {
 // produce (Canvas.jsx hardcodes "#111"); it exists to reject a forged
 // value, not to offer a color picker.
 const (
-	maxStrokePoints = 2000
+	// maxStrokePoints comfortably covers even a long, fast continuous
+	// drag (pointermove fires well under 500 times for any single
+	// gesture in practice) while keeping a maximally-sized stroke's JSON
+	// encoding safely under wsproto.maxPayloadBytes.
+	maxStrokePoints = 500
 	minStrokeWidth  = 0.5
 	maxStrokeWidth  = 20
 	coordMargin     = 0.5

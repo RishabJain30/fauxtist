@@ -56,6 +56,8 @@ func JoinErrorCode(err error) string {
 		return "room_full"
 	case errors.Is(err, ErrGameStarted):
 		return "game_started"
+	case errors.Is(err, ErrRoomClosed):
+		return "room_closed"
 	default:
 		return "invalid_join"
 	}

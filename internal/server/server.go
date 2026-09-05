@@ -1,10 +1,12 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"mime"
 	"net/http"
 	"os"
 
@@ -16,6 +18,12 @@ import (
 	"github.com/RishabJain30/fauxtist/internal/webui"
 	"github.com/RishabJain30/fauxtist/internal/wsproto"
 )
+
+// maxWSMessageBytes bounds one inbound WebSocket frame, set before the
+// join frame is even read. Generous enough for a stroke with many points
+// (see internal/room/validate.go's maxStrokePoints) while still bounding
+// how much any single frame can cost to read and parse.
+const maxWSMessageBytes = 64 * 1024
 
 // Sentinel join-frame failures, distinct from room.Join's business-rule
 // rejections (name_taken, room_full, ...) which already get a structured
@@ -76,23 +84,46 @@ type createRoomResp struct {
 	ReconnectToken string `json:"reconnectToken"`
 }
 
+// maxCreateRoomBodyBytes bounds the request body for POST /api/rooms —
+// generous for a JSON object holding nothing but a display name, far
+// short of anything that could meaningfully burden the decoder.
+const maxCreateRoomBodyBytes = 4 << 10 // 4 KiB
+
 func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
-	var req createRoomReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "name required", http.StatusBadRequest)
+	if ct, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || ct != "application/json" {
+		writeJSONError(w, http.StatusUnsupportedMediaType, "invalid_content_type", "Content-Type must be application/json")
 		return
 	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxCreateRoomBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields() // a client sending fields this endpoint doesn't understand is more likely confused or probing than intentional; reject rather than silently ignore
+	var req createRoomReq
+	if err := dec.Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_body", "request body must be a JSON object with a name field")
+		return
+	}
+	if dec.More() {
+		writeJSONError(w, http.StatusBadRequest, "invalid_body", "unexpected trailing data after the JSON body")
+		return
+	}
+
 	name, err := room.ValidatePlayerName(req.Name)
 	if err != nil {
-		http.Error(w, "invalid name", http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "invalid_name", "invalid player name")
 		return
 	}
 	code, playerID, token, err := s.hub.CreateRoom(name)
 	if err != nil {
-		http.Error(w, "could not create room", http.StatusInternalServerError)
+		if errors.Is(err, hub.ErrHubAtCapacity) {
+			writeJSONError(w, http.StatusServiceUnavailable, "capacity_reached", "the server is at capacity, please try again shortly")
+			return
+		}
+		writeJSONError(w, http.StatusInternalServerError, "internal_error", "could not create room")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(createRoomResp{Code: code, PlayerID: string(playerID), ReconnectToken: token})
 }
 
@@ -109,6 +140,7 @@ func (s *Server) joinRoom(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	conn.SetReadLimit(maxWSMessageBytes)
 	// A dedicated context for this one connection's background work
 	// (heartbeat, write pump): canceled the moment the read loop returns,
 	// for any reason, so nothing outlives the connection it serves.
@@ -125,7 +157,11 @@ func (s *Server) joinRoom(w http.ResponseWriter, r *http.Request) {
 	result, err := rm.Join(conn, joinReq)
 	if err != nil {
 		sendJoinError(ctx, conn, err)
-		conn.Close(websocket.StatusPolicyViolation, "join rejected")
+		status := websocket.StatusPolicyViolation
+		if errors.Is(err, room.ErrRoomClosed) {
+			status = websocket.StatusCode(wsproto.CloseRoomClosed)
+		}
+		conn.Close(status, "join rejected")
 		return
 	}
 
@@ -147,8 +183,8 @@ func readJoinFrame(ctx context.Context, conn *websocket.Conn) (room.JoinRequest,
 	if err != nil {
 		return room.JoinRequest{}, err
 	}
-	var env wsproto.Envelope
-	if err := json.Unmarshal(data, &env); err != nil || env.Type != wsproto.TypeJoin {
+	env, ok := decodeEnvelope(data)
+	if !ok || env.Type != wsproto.TypeJoin {
 		return room.JoinRequest{}, errBadJoin
 	}
 	if env.Version != wsproto.ProtocolVersion {
@@ -242,23 +278,44 @@ func trimLeadingSlash(p string) string {
 }
 
 // readLoop pumps inbound frames into the room until the connection closes.
-// A malformed frame, or one declaring an unsupported protocol version, is
-// dropped rather than closing an otherwise-healthy mid-game connection over
-// one bad message — safety just means never panicking on it, not treating
-// it as fatal.
+// A malformed frame, one declaring an unsupported protocol version, or one
+// that otherwise fails wsproto.ValidateEnvelope's shape checks (unknown
+// type, missing/oversized requestId, oversized payload) is dropped rather
+// than closing an otherwise-healthy mid-game connection over one bad
+// message — safety just means never panicking on it, not treating it as
+// fatal. Per-message-type semantic validation (stroke bounds, chat length,
+// etc.) happens once the room actor itself unmarshals the payload.
 func readLoop(ctx context.Context, conn *websocket.Conn, rm *room.Room, id game.PlayerID, connID uint64) {
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {
 			return
 		}
-		var env wsproto.Envelope
-		if err := json.Unmarshal(data, &env); err != nil {
+		env, ok := decodeEnvelope(data)
+		if !ok {
 			continue
 		}
 		if env.Version != wsproto.ProtocolVersion {
 			continue
 		}
+		if wsproto.ValidateEnvelope(env) != nil {
+			continue
+		}
 		rm.Submit(id, connID, env)
 	}
+}
+
+// decodeEnvelope parses exactly one JSON object as a wsproto.Envelope,
+// rejecting any trailing data after it — a client frame must contain one
+// JSON value, not a value followed by garbage or a second value.
+func decodeEnvelope(data []byte) (wsproto.Envelope, bool) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	var env wsproto.Envelope
+	if err := dec.Decode(&env); err != nil {
+		return wsproto.Envelope{}, false
+	}
+	if dec.More() {
+		return wsproto.Envelope{}, false
+	}
+	return env, true
 }

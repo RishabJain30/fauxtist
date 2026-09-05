@@ -105,6 +105,7 @@ func TestStrokeBroadcastsToAllClients(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	chat, _ := wsproto.Encode(wsproto.TypeChatMessage, wsproto.ChatPayload{Text: "hi"})
+	chat.RequestID = "test-request"
 	cb, _ := json.Marshal(chat)
 	if err := a.Write(ctx, websocket.MessageText, cb); err != nil {
 		t.Fatalf("write chat: %v", err)

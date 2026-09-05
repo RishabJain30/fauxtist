@@ -37,6 +37,7 @@ func writeMsg(t *testing.T, c *websocket.Conn, typ string, payload any) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	env, _ := wsproto.Encode(typ, payload)
+	env.RequestID = "test-request" // every real client command carries one; see wsproto.ValidateEnvelope
 	b, _ := json.Marshal(env)
 	if err := c.Write(ctx, websocket.MessageText, b); err != nil {
 		t.Fatalf("write %s: %v", typ, err)
