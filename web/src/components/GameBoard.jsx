@@ -16,7 +16,12 @@ export default function GameBoard({ state, meId, send }) {
       <div className="row" style={{ justifyContent: 'center' }}>
         {myTurn
           ? <span className="pill" style={{ background: 'var(--amber)' }}>✏️ Your turn — draw ONE stroke</span>
-          : <span className="pill"><span className="avatar" style={miniAvatar}>{drawer?.emoji || '🎭'}</span> {drawer?.name || '…'} is drawing…</span>}
+          : (
+            <span className="pill">
+              <span className="avatar" style={miniAvatar}>{drawer?.emoji || '🎭'}</span> {drawer?.name || '…'} is drawing…
+              {drawer?.connected === false && <span className="muted"> (reconnecting…)</span>}
+            </span>
+          )}
       </div>
       <Canvas strokes={state.strokes} canDraw={myTurn} onStrokeComplete={(s) => send('stroke', s)} />
     </div>

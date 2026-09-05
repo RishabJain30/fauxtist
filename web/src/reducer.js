@@ -52,7 +52,13 @@ export function reduce(state, msg) {
     case T.LobbyUpdate:
       return { ...state, players: p.players || [], hostId: p.hostId ?? state.hostId }
     case T.PlayerLeft:
-      return { ...state, players: state.players.map((pl) => (pl.id === p.id ? { ...pl, gone: true } : pl)) }
+      // The player was actually removed from the roster (lobby-only, after
+      // their reconnect grace expired) — not just marked disconnected.
+      return { ...state, players: state.players.filter((pl) => pl.id !== p.id) }
+    case T.PlayerPresenceChanged:
+      return { ...state, players: state.players.map((pl) => (pl.id === p.id ? { ...pl, connected: p.connected } : pl)) }
+    case T.HostChanged:
+      return { ...state, hostId: p.hostId }
     case T.RoundStarted:
       return {
         ...state,

@@ -62,6 +62,34 @@ describe('reduce', () => {
     expect(s.error).toBe('invalid or expired reconnect token')
   })
 
+  it('removes a player from the roster on player_left', () => {
+    let s = reduce(initialState(), {
+      type: T.LobbyUpdate,
+      payload: { players: [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }], hostId: 'a' },
+    })
+    s = reduce(s, { type: T.PlayerLeft, payload: { id: 'b' } })
+    expect(s.players).toHaveLength(1)
+    expect(s.players[0].id).toBe('a')
+  })
+
+  it('updates connected status on player_presence_changed without removing the player', () => {
+    let s = reduce(initialState(), {
+      type: T.LobbyUpdate,
+      payload: { players: [{ id: 'a', name: 'A', connected: true }], hostId: 'a' },
+    })
+    s = reduce(s, { type: T.PlayerPresenceChanged, payload: { id: 'a', connected: false } })
+    expect(s.players).toHaveLength(1)
+    expect(s.players[0].connected).toBe(false)
+    s = reduce(s, { type: T.PlayerPresenceChanged, payload: { id: 'a', connected: true } })
+    expect(s.players[0].connected).toBe(true)
+  })
+
+  it('updates hostId on host_changed', () => {
+    let s = reduce(initialState(), { type: T.LobbyUpdate, payload: { players: [{ id: 'a' }, { id: 'b' }], hostId: 'a' } })
+    s = reduce(s, { type: T.HostChanged, payload: { hostId: 'b' } })
+    expect(s.hostId).toBe('b')
+  })
+
   it('accumulates chat', () => {
     let s = reduce(initialState(), { type: T.ChatBroadcast, payload: { from: 'a', text: 'hi' } })
     expect(s.chat).toHaveLength(1)
