@@ -83,6 +83,12 @@ export function createRoomConnection(code, join, handlers, deps = {}) {
   let fatal = false
   let lastAppliedSeq = null
   let resyncing = false
+  // generation increments once per actual new WebSocket (connect() call) —
+  // never for a resync, which reuses the existing socket. Carried on every
+  // dispatched state_snapshot action so a consumer (useVoice.js) can tell
+  // "this snapshot confirms a brand-new connection, presence server-side
+  // was reset" apart from "this snapshot is just a resync refresh".
+  let generation = 0
   let status = 'connecting'
   let creds = loadCredentials(code, storage) || join
 
@@ -113,6 +119,7 @@ export function createRoomConnection(code, join, handlers, deps = {}) {
 
   function connect() {
     if (stopped) return
+    generation += 1
     const socket = new WebSocketImpl(urlFor(code))
     ws = socket
 
@@ -149,7 +156,7 @@ export function createRoomConnection(code, join, handlers, deps = {}) {
         everConnected = true
         attempt = 0
         firstDisconnectAt = null
-        onDispatch({ type: STATE_SNAPSHOT_RECEIVED, payload: env.payload })
+        onDispatch({ type: STATE_SNAPSHOT_RECEIVED, payload: env.payload, generation })
         setStatus('connected')
         return
       }
