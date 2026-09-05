@@ -125,7 +125,7 @@ func readEnvelope(t *testing.T, c *websocket.Conn) wsproto.Envelope {
 
 // TestReconnectTokenNeverStoredRawOrLeaked proves requirements #3 and #4: the
 // room only ever holds a sha256 hash of a seat's reconnect token (never the
-// raw value), and the raw token never appears in a room_state snapshot.
+// raw value), and the raw token never appears in a state_snapshot snapshot.
 func TestReconnectTokenNeverStoredRawOrLeaked(t *testing.T) {
 	r, hostID, hostToken := newTestRoom(t, "Host")
 
@@ -153,7 +153,7 @@ func TestReconnectTokenNeverStoredRawOrLeaked(t *testing.T) {
 		t.Fatalf("read snapshot: %v", err)
 	}
 	if strings.Contains(string(data), hostToken) {
-		t.Fatalf("room_state snapshot leaked the raw reconnect token: %s", data)
+		t.Fatalf("state_snapshot snapshot leaked the raw reconnect token: %s", data)
 	}
 }
 
@@ -167,13 +167,13 @@ func TestReplacedConnectionIsClosedAndCannotAct(t *testing.T) {
 	client1, conn1 := dialTestConn(t)
 	defer client1.CloseNow()
 	res1 := joinAndPump(t, r, conn1, JoinRequest{Reconnect: true, PlayerID: hostID, Token: hostToken})
-	_ = readEnvelope(t, client1) // drain room_state
+	_ = readEnvelope(t, client1) // drain state_snapshot
 	_ = readEnvelope(t, client1) // drain lobby_update (broadcastLobby reaches the joiner itself)
 
 	client2, conn2 := dialTestConn(t)
 	defer client2.CloseNow()
 	res2 := joinAndPump(t, r, conn2, JoinRequest{Reconnect: true, PlayerID: hostID, Token: hostToken})
-	_ = readEnvelope(t, client2) // drain room_state
+	_ = readEnvelope(t, client2) // drain state_snapshot
 	_ = readEnvelope(t, client2) // drain lobby_update
 
 	if res2.PlayerID != res1.PlayerID {
@@ -234,8 +234,8 @@ func TestReconnectIgnoresStrayNameField(t *testing.T) {
 	joinAndPump(t, r, conn, JoinRequest{Reconnect: true, PlayerID: hostID, Token: hostToken, Name: "Hacked"})
 
 	env := readEnvelope(t, client)
-	if env.Type != wsproto.TypeRoomState {
-		t.Fatalf("type = %q, want room_state", env.Type)
+	if env.Type != wsproto.TypeStateSnapshot {
+		t.Fatalf("type = %q, want state_snapshot", env.Type)
 	}
 	var snap struct {
 		Players []game.Player `json:"players"`

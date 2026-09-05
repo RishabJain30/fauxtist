@@ -37,6 +37,15 @@ type Room struct {
 	roundGeneration int64
 	durations       Durations
 
+	// revision is the room's authoritative state revision: bumped exactly
+	// once per accepted command/transition that changes externally visible
+	// state (see stamp, apply, processJoin, processLeave,
+	// handleGraceExpired), and stamped as Seq on every outbound envelope so
+	// every recipient of the same transition observes the same number even
+	// though their payloads are redacted differently. Snapshot requests,
+	// heartbeats, and rejected commands never bump it.
+	revision int64
+
 	inbox             chan inbound
 	joins             chan joinReq
 	leaves            chan leaveReq
@@ -48,12 +57,13 @@ type Room struct {
 	snapshotCh        chan snapshotReq
 	done              chan struct{}
 
-	discussionTimer *time.Timer
-	revealTimer     *time.Timer
-	drawSkipTimer   *time.Timer
-	guessTimer      *time.Timer
-	guessDeadline   time.Time
-	graceTimers     map[game.PlayerID]*time.Timer
+	discussionTimer    *time.Timer
+	discussionDeadline time.Time
+	revealTimer        *time.Timer
+	drawSkipTimer      *time.Timer
+	guessTimer         *time.Timer
+	guessDeadline      time.Time
+	graceTimers        map[game.PlayerID]*time.Timer
 }
 
 // NewRoom builds a lobby-phase room pre-seeded with its host. hostTokenHash
@@ -97,9 +107,7 @@ func (r *Room) Run(ctx context.Context) {
 		case j := <-r.joins:
 			r.processJoin(j)
 		case <-r.advance:
-			for _, ev := range r.engine.AdvanceRound() {
-				r.broadcastEvent(ev)
-			}
+			r.apply(r.engine.AdvanceRound(), nil)
 		case <-r.discussionTimeout:
 			r.apply(r.engine.EndDiscussion(r.engine.State().HostID))
 		case lv := <-r.leaves:
@@ -112,9 +120,10 @@ func (r *Room) Run(ctx context.Context) {
 			r.handleGuessTimeout(m)
 		case req := <-r.snapshotCh:
 			req.resp <- RoomSnapshot{
-				Phase:   r.engine.State().Phase,
-				HostID:  r.engine.State().HostID,
-				Players: r.playerViews(),
+				Phase:    r.engine.State().Phase,
+				HostID:   r.engine.State().HostID,
+				Players:  r.playerViews(),
+				Revision: r.revision,
 			}
 		case msg := <-r.inbox:
 			if c, ok := r.clients[msg.from]; ok && c.ConnID == msg.connID {
@@ -140,9 +149,10 @@ func (r *Room) Submit(from game.PlayerID, connID uint64, env wsproto.Envelope) {
 // future admin/observability endpoint) that must never touch engine or
 // presence state directly.
 type RoomSnapshot struct {
-	Phase   game.Phase
-	HostID  game.PlayerID
-	Players []wsproto.PlayerView
+	Phase    game.Phase
+	HostID   game.PlayerID
+	Players  []wsproto.PlayerView
+	Revision int64
 }
 
 type snapshotReq struct{ resp chan RoomSnapshot }
@@ -163,7 +173,7 @@ func (r *Room) handle(msg inbound) {
 	case wsproto.TypeStroke:
 		var p wsproto.StrokePayload
 		if err := json.Unmarshal(msg.envelope.Payload, &p); err != nil {
-			r.sendError(msg.from, "bad stroke payload")
+			r.sendError(msg.from, msg.envelope.RequestID, "bad_payload", "bad stroke payload")
 			return
 		}
 		r.apply(r.engine.AddStroke(msg.from, toStroke(msg.from, p)))
@@ -174,14 +184,14 @@ func (r *Room) handle(msg inbound) {
 	case wsproto.TypeCastVote:
 		var p wsproto.VotePayload
 		if err := json.Unmarshal(msg.envelope.Payload, &p); err != nil {
-			r.sendError(msg.from, "bad vote payload")
+			r.sendError(msg.from, msg.envelope.RequestID, "bad_payload", "bad vote payload")
 			return
 		}
 		r.apply(r.engine.CastVote(msg.from, game.PlayerID(p.Target), r.connectedSet()))
 	case wsproto.TypeImpostorGuess:
 		var p wsproto.ImpostorGuessPayload
 		if err := json.Unmarshal(msg.envelope.Payload, &p); err != nil {
-			r.sendError(msg.from, "bad guess payload")
+			r.sendError(msg.from, msg.envelope.RequestID, "bad_payload", "bad guess payload")
 			return
 		}
 		r.apply(r.engine.ImpostorGuess(msg.from, p.Guess))
@@ -208,18 +218,33 @@ func (r *Room) handle(msg inbound) {
 			return
 		}
 		r.broadcastVoiceState(msg.from, p)
+	case wsproto.TypeResync:
+		// Explicit resync request: a read-only re-send of the current
+		// snapshot to this one connection. Never bumps the revision — it
+		// observes state, it doesn't change it.
+		if c, ok := r.clients[msg.from]; ok {
+			r.sendSnapshot(c)
+		}
 	default:
-		r.sendError(msg.from, "unknown message type")
+		r.sendError(msg.from, msg.envelope.RequestID, "unknown_message_type", "unknown message type")
 	}
 }
 
 // apply broadcasts engine events, or ignores a per-action validation error.
+// This is the single chokepoint every engine-event-producing action routes
+// through (StartGame, AddStroke, EndDiscussion, Restart, CastVote,
+// ImpostorGuess, SkipTurn, ResolveImpostorTimeout, AdvanceRound), so it is
+// also where the room's revision advances: exactly once per accepted
+// command, even when that command cascades into several engine events or
+// several recipient-specific wire messages. A rejected command (err != nil)
+// or one that produced no events never bumps it.
 func (r *Room) apply(events []game.Event, err error) {
-	if err != nil {
+	if err != nil || len(events) == 0 {
 		// Validation errors are per-action; the client UI prevents most of them.
 		// Kept explicit so future logging can hook in here.
 		return
 	}
+	r.revision++
 	for _, ev := range events {
 		r.broadcastEvent(ev)
 	}

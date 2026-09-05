@@ -7,8 +7,22 @@ import (
 	"github.com/RishabJain30/fauxtist/internal/wsproto"
 )
 
+// stamp fills in the envelope fields only the room knows: the protocol
+// version was already set by wsproto.Encode, so this adds the room's public
+// id and its current revision. Every outbound envelope must pass through
+// here exactly once, right before it reaches a Client's send channel — the
+// one place a message's seq is fixed, so every recipient of the same
+// broadcast (even with different redacted payloads) observes the same
+// number.
+func (r *Room) stamp(env wsproto.Envelope) wsproto.Envelope {
+	env.RoomID = r.Code
+	env.Seq = r.revision
+	return env
+}
+
 // broadcast sends an envelope to every connected client.
 func (r *Room) broadcast(env wsproto.Envelope) {
+	env = r.stamp(env)
 	for _, c := range r.clients {
 		c.trySend(env)
 	}
@@ -17,23 +31,30 @@ func (r *Room) broadcast(env wsproto.Envelope) {
 // sendTo sends an envelope to one client if present.
 func (r *Room) sendTo(id game.PlayerID, env wsproto.Envelope) {
 	if c, ok := r.clients[id]; ok {
-		c.trySend(env)
+		c.trySend(r.stamp(env))
 	}
 }
 
-func (r *Room) sendError(id game.PlayerID, msg string) {
-	env, err := wsproto.Encode(wsproto.TypeError, wsproto.ErrorPayload{Message: msg})
+// sendError sends a typed, machine-readable error to one client. requestID
+// (from the offending command's envelope, if any) is echoed back so the
+// client can correlate the rejection with the specific command it sent.
+func (r *Room) sendError(id game.PlayerID, requestID, code, msg string) {
+	env, err := wsproto.Encode(wsproto.TypeError, wsproto.ErrorPayload{Message: msg, Code: code})
 	if err == nil {
+		env.RequestID = requestID
 		r.sendTo(id, env)
 	}
 }
 
-// sendSnapshot sends the full current state to a (re)joining client. The word is
-// omitted if the recipient is the impostor.
+// sendSnapshot sends the canonical, recipient-specific state_snapshot to
+// one client: on a fresh join, a reconnect, or an explicit resync request.
+// It is the only message a client needs to fully reconstruct its UI from
+// scratch, and always replaces (never merges into) the client's local
+// state.
 func (r *Room) sendSnapshot(c *Client) {
-	snap := r.stateSnapshot(c.PlayerID)
-	if env, err := wsproto.Encode(wsproto.TypeRoomState, snap); err == nil {
-		c.trySend(env)
+	snap := r.buildSnapshot(c.PlayerID)
+	if env, err := wsproto.Encode(wsproto.TypeStateSnapshot, snap); err == nil {
+		c.trySend(r.stamp(env))
 	}
 }
 
@@ -55,7 +76,7 @@ func (r *Room) broadcastEvent(ev game.Event) {
 				payload["word"] = e.Word
 			}
 			if env, err := wsproto.Encode(wsproto.TypeRoundStarted, payload); err == nil {
-				c.trySend(env)
+				c.trySend(r.stamp(env))
 			}
 		}
 		r.evaluateDrawTimer()
@@ -72,10 +93,19 @@ func (r *Room) broadcastEvent(ev game.Event) {
 		env, _ := wsproto.Encode(wsproto.TypePhaseChanged, wsproto.PhaseChangedPayload{Phase: string(e.Phase)})
 		r.broadcast(env)
 		if e.Phase == game.PhaseReveal {
-			// Compute the guess deadline (if any) before building the reveal
-			// payload, so it can be included for clients to show a countdown.
+			// Compute the guess deadline (if any) before building the round
+			// result payload, so it can be included for clients to show a
+			// countdown. Only announce here when the round is caught (and so
+			// awaiting a guess with no RoundEnded coming immediately after,
+			// in this same event cascade) — an uncaught round's RoundEnded
+			// event, built from finishVoting in the same call, always
+			// follows right behind this one and announces the (identical,
+			// now-final) result itself, so announcing it twice here would
+			// just be a redundant duplicate send.
 			r.evaluateGuessDeadline()
-			r.broadcastReveal()
+			if res := r.engine.State().LastResult; res != nil && res.Caught {
+				r.broadcastRoundResult(*res)
+			}
 		}
 		r.onPhaseChange(e.Phase)
 		r.evaluateDrawTimer()
@@ -85,8 +115,7 @@ func (r *Room) broadcastEvent(ev game.Event) {
 		})
 		r.broadcast(env)
 	case game.RoundEnded:
-		env, _ := wsproto.Encode(wsproto.TypeRoundResult, e.Result)
-		r.broadcast(env)
+		r.broadcastRoundResult(e.Result)
 		r.startRevealTimer()
 	case game.GameEnded:
 		env, _ := wsproto.Encode(wsproto.TypeGameOver, map[string]any{"finalScores": e.FinalScores})
@@ -124,7 +153,9 @@ func (r *Room) onPhaseChange(p game.Phase) {
 		r.discussionTimer.Stop()
 		r.discussionTimer = nil
 	}
+	r.discussionDeadline = time.Time{}
 	if p == game.PhaseDiscussion {
+		r.discussionDeadline = time.Now().Add(r.durations.Discussion)
 		r.discussionTimer = time.AfterFunc(r.durations.Discussion, func() {
 			// Timer fires on its own goroutine; route back through a dedicated
 			// channel (not Submit/an inbox message) since this is a
@@ -160,33 +191,57 @@ func (r *Room) broadcastPlayerLeft(id game.PlayerID) {
 	}
 }
 
-// broadcastReveal tells clients who was caught when entering the reveal phase.
-// The word is withheld from the impostor, who still has to guess it.
-func (r *Room) broadcastReveal() {
-	res := r.engine.State().LastResult
-	if res == nil {
-		return
+// redactedResult returns a copy of res with the secret word blanked out for
+// the round's own impostor, who never learns it — whether they evaded
+// detection, were caught and guessed (right or wrong), or timed out. This
+// is the one place that rule is enforced, shared by every place a round
+// result is sent (the live announcement and the full-state snapshot) so it
+// can't drift between them.
+func redactedResult(res game.RoundResult, viewer game.PlayerID) game.RoundResult {
+	if viewer == res.ImpostorID {
+		res.Word = ""
 	}
+	return res
+}
+
+// broadcastRoundResult announces this round's result to every client,
+// individually redacted via redactedResult. Used both when reveal begins
+// (announcing caught/not-caught, immediately final unless caught) and when
+// a caught impostor's guess or timeout later finalizes the round — the
+// single path either way, so the announcement and the redaction rule can
+// never disagree with each other.
+func (r *Room) broadcastRoundResult(res game.RoundResult) {
 	for id, c := range r.clients {
+		redacted := redactedResult(res, id)
 		payload := map[string]any{
-			"impostorId": string(res.ImpostorID),
-			"caught":     res.Caught,
-			"tally":      res.Tally,
+			"impostorId": string(redacted.ImpostorID),
+			"caught":     redacted.Caught,
+			"tally":      redacted.Tally,
 		}
-		if id != res.ImpostorID {
-			payload["word"] = res.Word
+		if redacted.Word != "" {
+			payload["word"] = redacted.Word
 		}
-		if res.Caught && res.ImpostorGuess == "" && !r.guessDeadline.IsZero() {
+		// A guess or timeout resolution: only present once the caught
+		// impostor's fate is actually settled, never on the initial
+		// "entering reveal, awaiting a guess" announcement.
+		resolved := redacted.ImpostorGuess != "" || redacted.ImpostorTimedOut
+		if resolved {
+			payload["impostorGuess"] = redacted.ImpostorGuess
+			payload["impostorGuessedRight"] = redacted.ImpostorGuessedRight
+			payload["impostorTimedOut"] = redacted.ImpostorTimedOut
+		}
+		if redacted.Caught && !resolved && !r.guessDeadline.IsZero() {
 			payload["guessDeadlineMs"] = r.guessDeadline.UnixMilli()
 		}
 		if env, err := wsproto.Encode(wsproto.TypeRoundResult, payload); err == nil {
-			c.trySend(env)
+			c.trySend(r.stamp(env))
 		}
 	}
 }
 
 // broadcastExcept sends to every connected client except one.
 func (r *Room) broadcastExcept(except game.PlayerID, env wsproto.Envelope) {
+	env = r.stamp(env)
 	for id, c := range r.clients {
 		if id != except {
 			c.trySend(env)
@@ -261,8 +316,13 @@ func (r *Room) evaluateVoting() {
 	}
 }
 
-// stateSnapshot builds a room_state payload, hiding the word from the impostor.
-func (r *Room) stateSnapshot(viewer game.PlayerID) map[string]any {
+// buildSnapshot is the single authoritative builder for the canonical
+// state_snapshot payload: every join, reconnect, and explicit resync sends
+// exactly what this returns for that viewer, so redaction can never drift
+// between call sites. It carries everything the UI needs to reconstruct
+// its screen after a full refresh, for every phase, without depending on
+// any previously-received incremental event.
+func (r *Room) buildSnapshot(viewer game.PlayerID) map[string]any {
 	s := r.engine.State()
 	snap := map[string]any{
 		"phase":       string(s.Phase),
@@ -276,17 +336,44 @@ func (r *Room) stateSnapshot(viewer game.PlayerID) map[string]any {
 		"lap":         s.Lap,
 		"totalLaps":   s.TotalLaps,
 	}
+	if you := r.playerView(viewer); you != nil {
+		snap["you"] = *you
+	}
+	if s.Phase == game.PhaseDrawing && s.TurnIndex >= 0 && s.TurnIndex < len(s.Players) {
+		snap["currentPlayer"] = string(s.Players[s.TurnIndex].ID)
+	}
+	if s.Phase == game.PhaseDiscussion && !r.discussionDeadline.IsZero() {
+		snap["discussionDeadlineMs"] = r.discussionDeadline.UnixMilli()
+	}
 	if s.Phase != game.PhaseLobby {
 		snap["youAreImpostor"] = viewer == s.ImpostorID
 		if viewer != s.ImpostorID {
 			snap["word"] = s.Word
 		}
 	}
+	if s.Phase == game.PhaseVoting {
+		_, voted := s.Votes[viewer]
+		cast, total := r.engine.VotingProgress(r.connectedSet())
+		targets := make([]string, 0, len(s.Players))
+		for _, p := range s.Players {
+			if p.ID != viewer {
+				targets = append(targets, string(p.ID))
+			}
+		}
+		snap["hasVoted"] = voted
+		snap["votesCast"] = cast
+		snap["votesTotal"] = total
+		snap["voteTargets"] = targets
+	}
 	if s.LastResult != nil {
-		snap["lastResult"] = s.LastResult
-		if s.Phase == game.PhaseReveal && s.LastResult.Caught && s.LastResult.ImpostorGuess == "" && !r.guessDeadline.IsZero() {
+		redacted := redactedResult(*s.LastResult, viewer)
+		snap["lastResult"] = redacted
+		if s.Phase == game.PhaseReveal && redacted.Caught && redacted.ImpostorGuess == "" && !redacted.ImpostorTimedOut && !r.guessDeadline.IsZero() {
 			snap["guessDeadlineMs"] = r.guessDeadline.UnixMilli()
 		}
+	}
+	if s.Phase == game.PhaseGameOver {
+		snap["finalScores"] = r.playerViews()
 	}
 	return snap
 }

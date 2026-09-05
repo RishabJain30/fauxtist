@@ -18,7 +18,7 @@ func joinFourAndStartKnowingImpostor(t *testing.T, r *Room, hostID game.PlayerID
 	t.Helper()
 	client1, conn1 := dialTestConn(t)
 	res1 := joinAndPump(t, r, conn1, JoinRequest{Reconnect: true, PlayerID: hostID, Token: hostToken})
-	drainUntilRoomState(t, client1)
+	drainUntilStateSnapshot(t, client1)
 	host := testPlayer{conn: client1, playerID: hostID, connID: res1.ConnID, token: hostToken}
 	players = []testPlayer{host, joinNewPlayer(t, r, "P2"), joinNewPlayer(t, r, "P3"), joinNewPlayer(t, r, "P4")}
 
@@ -180,7 +180,7 @@ func TestPresenceAndHostChangedEventsCarryNoSecrets(t *testing.T) {
 	startTestRoom(t, r)
 	client1, conn1 := dialTestConn(t)
 	res1 := joinAndPump(t, r, conn1, JoinRequest{Reconnect: true, PlayerID: hostID, Token: hostToken})
-	drainUntilRoomState(t, client1)
+	drainUntilStateSnapshot(t, client1)
 	host := testPlayer{playerID: hostID, connID: res1.ConnID, token: hostToken}
 	bob := joinNewPlayer(t, r, "Bob")
 

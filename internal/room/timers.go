@@ -28,6 +28,7 @@ func (r *Room) handleGraceExpired(m graceExpiredMsg) {
 	}
 	pres.graceExpired = true
 	delete(r.graceTimers, m.playerID)
+	r.revision++ // grace expiring is always visible: a removal, a host migration, or at minimum a re-broadcast lobby view
 
 	if r.engine.State().Phase == game.PhaseLobby {
 		if err := r.engine.RemovePlayer(m.playerID); err == nil {

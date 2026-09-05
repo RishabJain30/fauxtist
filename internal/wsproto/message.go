@@ -2,6 +2,20 @@ package wsproto
 
 import "encoding/json"
 
+// ProtocolVersion is the current wire protocol version. Every envelope in
+// both directions carries it; the server rejects anything else at the
+// join frame with CloseUnsupportedVersion (see docs/protocol.md).
+const ProtocolVersion = 1
+
+// Close codes are WebSocket close codes in the private-use range
+// (4000-4999, RFC 6455 §7.4.2) for protocol-level rejections that happen
+// before or outside the existing structured-error-frame + 1008 path used
+// for join/reconnect business-rule failures (name_taken, room_full, etc).
+const (
+	CloseUnsupportedVersion = 4001
+	CloseInvalidEnvelope    = 4002
+)
+
 // Message type constants. Client->server and server->client share one namespace.
 const (
 	// Client -> server
@@ -17,42 +31,55 @@ const (
 	TypeVoiceSignal   = "voice_signal"
 	TypeVoiceState    = "voice_state"
 	TypeNewGame       = "new_game"
+	TypeResync        = "resync"
 
 	// Server -> client
-	TypeRoomState             = "room_state"
+	TypeStateSnapshot         = "state_snapshot"
 	TypeJoinAccepted          = "join_accepted"
 	TypePlayerJoined          = "player_joined"
 	TypePlayerLeft            = "player_left"
 	TypePlayerPresenceChanged = "player_presence_changed"
 	TypeHostChanged           = "host_changed"
 	TypeLobbyUpdate           = "lobby_update"
-	TypeRoundStarted    = "round_started"
-	TypeStrokeBroadcast = "stroke_broadcast"
-	TypeTurnChanged     = "turn_changed"
-	TypePhaseChanged    = "phase_changed"
-	TypeVoteUpdate      = "vote_update"
-	TypeRoundResult     = "round_result"
-	TypeGameOver        = "game_over"
-	TypeChatBroadcast   = "chat_broadcast"
-	TypeError           = "error"
-	TypeVoicePeers      = "voice_peers"
-	TypeVoicePeerJoined = "voice_peer_joined"
-	TypeVoicePeerLeft   = "voice_peer_left"
+	TypeRoundStarted          = "round_started"
+	TypeStrokeBroadcast       = "stroke_broadcast"
+	TypeTurnChanged           = "turn_changed"
+	TypePhaseChanged          = "phase_changed"
+	TypeVoteUpdate            = "vote_update"
+	TypeRoundResult           = "round_result"
+	TypeGameOver              = "game_over"
+	TypeChatBroadcast         = "chat_broadcast"
+	TypeError                 = "error"
+	TypeVoicePeers            = "voice_peers"
+	TypeVoicePeerJoined       = "voice_peer_joined"
+	TypeVoicePeerLeft         = "voice_peer_left"
 )
 
-// Envelope is the outer wire frame for every message.
+// Envelope is the outer wire frame for every message in both directions.
+// RoomID and Seq are stamped by the room on every outbound message (Seq is
+// the room's authoritative revision at send time — see Room.stamp);
+// RequestID is set by the client on outbound commands and echoed back on
+// any error produced by that specific command, for client-side
+// correlation. Fields unused in a given direction are omitted rather than
+// sent as zero values.
 type Envelope struct {
-	Type    string          `json:"type"`
-	Payload json.RawMessage `json:"payload"`
+	Version   int             `json:"version"`
+	Type      string          `json:"type"`
+	RoomID    string          `json:"roomId,omitempty"`
+	Seq       int64           `json:"seq,omitempty"`
+	RequestID string          `json:"requestId,omitempty"`
+	Payload   json.RawMessage `json:"payload"`
 }
 
-// Encode builds an Envelope from a typed payload.
+// Encode builds an Envelope from a typed payload, stamped with the current
+// protocol version. RoomID/Seq (server->client) or RequestID (client->
+// server) are added afterward by the caller, once known.
 func Encode(t string, payload any) (Envelope, error) {
 	b, err := json.Marshal(payload)
 	if err != nil {
 		return Envelope{}, err
 	}
-	return Envelope{Type: t, Payload: b}, nil
+	return Envelope{Version: ProtocolVersion, Type: t, Payload: b}, nil
 }
 
 // ---- Client -> server payloads ----
