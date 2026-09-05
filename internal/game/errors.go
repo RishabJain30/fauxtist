@@ -12,6 +12,7 @@ var (
 	ErrNotImpostor   = errors.New("only the impostor may guess")
 	ErrNoWords       = errors.New("word source exhausted")
 	ErrRoomFull      = errors.New("room is full")
+	ErrNotInLobby    = errors.New("players can only be removed from the lobby")
 )
 
 // MinPlayers is the minimum required to start a game.

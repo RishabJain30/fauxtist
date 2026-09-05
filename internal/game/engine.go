@@ -95,6 +95,48 @@ func (e *Engine) UpsertPlayer(p Player) error {
 	return nil
 }
 
+// RemovePlayer removes a player from the roster. Lobby-only: once a game has
+// started, removing a player would corrupt turn order, role assignment,
+// scoring, and round state, so a disconnected in-game player must instead be
+// handled by the room's phase-specific rules (skip their turn, exclude them
+// from the vote requirement, etc.) rather than removed here.
+func (e *Engine) RemovePlayer(id PlayerID) error {
+	if e.state.Phase != PhaseLobby {
+		return ErrNotInLobby
+	}
+	idx := e.playerIndex(id)
+	if idx < 0 {
+		return ErrUnknownPlayer
+	}
+	e.state.Players = append(e.state.Players[:idx], e.state.Players[idx+1:]...)
+	return nil
+}
+
+// SetHostID transitions host ownership, e.g. for deterministic host
+// migration after the previous host's reconnect grace period expires.
+// Server-only: callers are trusted to have already decided this is
+// warranted (no permission check here, unlike the player-triggered actions
+// below).
+func (e *Engine) SetHostID(id PlayerID) error {
+	if e.playerIndex(id) < 0 {
+		return ErrUnknownPlayer
+	}
+	e.state.HostID = id
+	return nil
+}
+
+// SkipTurn advances the turn without recording a stroke. Server-only, for a
+// drawer who has been disconnected past the room's disconnected-turn grace
+// period; it reuses the exact same turn-advancement (and lap/phase
+// transition) logic as a normal AddStroke, so clients see identical
+// TurnChanged/PhaseChanged events either way.
+func (e *Engine) SkipTurn() ([]Event, error) {
+	if e.state.Phase != PhaseDrawing {
+		return nil, ErrWrongPhase
+	}
+	return e.advanceTurn(), nil
+}
+
 // beginRound sets up round n: picks a word, assigns the impostor, resets the
 // canvas and turn pointer, and returns the round-start events.
 func (e *Engine) beginRound(n int) ([]Event, error) {
@@ -181,10 +223,13 @@ func (e *Engine) EndDiscussion(by PlayerID) ([]Event, error) {
 	return []Event{PhaseChanged{Phase: PhaseVoting}}, nil
 }
 
-// CastVote records a vote. When every player has voted, it tallies results:
-// if the impostor is caught it moves to reveal (impostor may guess in Task 6);
-// otherwise it scores the impostor's win and advances the round.
-func (e *Engine) CastVote(voter, target PlayerID) ([]Event, error) {
+// CastVote records a vote from a still-eligible voter, then resolves voting
+// if every currently eligible player has now voted. connected is the set of
+// currently connected player ids, supplied by the room — the engine has no
+// notion of presence, so a disconnected player's outstanding vote no longer
+// blocks resolution. Pass nil to treat every player as eligible (e.g. from
+// tests that don't care about presence).
+func (e *Engine) CastVote(voter, target PlayerID, connected map[PlayerID]bool) ([]Event, error) {
 	if e.state.Phase != PhaseVoting {
 		return nil, ErrWrongPhase
 	}
@@ -195,15 +240,62 @@ func (e *Engine) CastVote(voter, target PlayerID) ([]Event, error) {
 		return nil, ErrAlreadyVoted
 	}
 	e.state.Votes[voter] = target
-	events := []Event{VoteRecorded{
-		Voter:      voter,
-		VotesCast:  len(e.state.Votes),
-		VotesTotal: len(e.state.Players),
-	}}
-	if len(e.state.Votes) < len(e.state.Players) {
+	cast, total := e.votingProgress(connected)
+	events := []Event{VoteRecorded{Voter: voter, VotesCast: cast, VotesTotal: total}}
+	if !e.votingCanResolve(connected) {
 		return events, nil
 	}
 	return append(events, e.finishVoting()...), nil
+}
+
+// VotingProgress reports how many eligible (per connected) players have
+// voted so far, and how many are expected to. Exported so the room can
+// (re)broadcast an updated requirement when presence changes without
+// necessarily resolving voting.
+func (e *Engine) VotingProgress(connected map[PlayerID]bool) (cast, total int) {
+	return e.votingProgress(connected)
+}
+
+// CheckVotingResolution re-evaluates whether voting should resolve now,
+// given the currently connected set. Called by the room whenever a player's
+// presence changes during voting: a disconnect may complete the
+// requirement without any new vote being cast. A no-op outside the voting
+// phase or if the requirement isn't yet met.
+func (e *Engine) CheckVotingResolution(connected map[PlayerID]bool) []Event {
+	if e.state.Phase != PhaseVoting || !e.votingCanResolve(connected) {
+		return nil
+	}
+	return e.finishVoting()
+}
+
+// votingProgress reports how many votes have been cast in total (a vote
+// already cast remains counted even if that voter later disconnects — see
+// votingCanResolve) and how many players are currently required to vote: a
+// player counts toward the requirement if they're connected, OR if they've
+// already voted (so a since-disconnected voter's own past vote doesn't
+// shrink the requirement below what they already satisfied).
+func (e *Engine) votingProgress(connected map[PlayerID]bool) (cast, total int) {
+	cast = len(e.state.Votes)
+	for _, p := range e.state.Players {
+		_, voted := e.state.Votes[p.ID]
+		isConnected := connected == nil || connected[p.ID]
+		if voted || isConnected {
+			total++
+		}
+	}
+	return cast, total
+}
+
+// votingCanResolve reports whether every currently-required player has cast
+// a vote. Never resolves when nobody is connected at all, even if votes were
+// cast earlier — that waits for someone to reconnect instead of resolving
+// (or looping) on a stale requirement.
+func (e *Engine) votingCanResolve(connected map[PlayerID]bool) bool {
+	if connected != nil && len(connected) == 0 {
+		return false
+	}
+	cast, total := e.votingProgress(connected)
+	return total > 0 && cast >= total
 }
 
 // tally counts votes received per player.
@@ -323,6 +415,9 @@ func (e *Engine) ImpostorGuess(by PlayerID, guess string) ([]Event, error) {
 	if by != e.state.ImpostorID {
 		return nil, ErrNotImpostor
 	}
+	if e.guessAlreadyResolved() {
+		return nil, ErrWrongPhase
+	}
 	right := strings.EqualFold(strings.TrimSpace(guess), strings.TrimSpace(e.state.Word))
 	e.state.ImpostorGuess = guess
 	e.state.LastResult.ImpostorGuess = guess
@@ -337,4 +432,34 @@ func (e *Engine) ImpostorGuess(by PlayerID, guess string) ([]Event, error) {
 		}
 	}
 	return e.finalizeRound(), nil
+}
+
+// ResolveImpostorTimeout resolves the reveal phase when a caught impostor's
+// guess deadline expires without a guess: treated as an incorrect guess, so
+// every non-impostor gets the usual +1. Server-only — there is no guess text
+// to validate against, so this does not go through ImpostorGuess. A valid
+// guess arriving first (or a timeout that already fired) makes this a no-op
+// via the same guessAlreadyResolved check, so the two can never both apply.
+func (e *Engine) ResolveImpostorTimeout() ([]Event, error) {
+	if e.state.Phase != PhaseReveal || e.state.LastResult == nil || !e.state.LastResult.Caught {
+		return nil, ErrWrongPhase
+	}
+	if e.guessAlreadyResolved() {
+		return nil, ErrWrongPhase
+	}
+	for _, p := range e.state.Players {
+		if p.ID != e.state.ImpostorID {
+			e.applyScore(p.ID, 1)
+		}
+	}
+	e.state.LastResult.ImpostorTimedOut = true
+	e.state.LastResult.ImpostorGuessedRight = false
+	return e.finalizeRound(), nil
+}
+
+// guessAlreadyResolved reports whether the caught impostor's guess has
+// already been settled, by a real guess or an earlier timeout — whichever
+// happens first must make the other a no-op.
+func (e *Engine) guessAlreadyResolved() bool {
+	return e.state.ImpostorGuess != "" || (e.state.LastResult != nil && e.state.LastResult.ImpostorTimedOut)
 }
