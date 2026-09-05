@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/time/rate"
 	"nhooyr.io/websocket"
 
 	"github.com/RishabJain30/fauxtist/internal/hub"
@@ -91,7 +92,18 @@ func TestPlayerIDsAreNotDerivedFromRoomCodeOrName(t *testing.T) {
 // TestReconnectCredentialsAreSufficientlyRandom proves requirement #2.
 func TestReconnectCredentialsAreSufficientlyRandom(t *testing.T) {
 	h := hub.New()
-	srv := httptest.NewServer(New(h).Handler())
+	s := New(h)
+	// This test's 25 rapid room creations from one address exercise
+	// credential randomness, not abuse resistance — the room-creation rate
+	// limiter (roomcreatelimit.go) is a separate concern with its own
+	// dedicated coverage (see TestCreateRoomIsRateLimitedPerIP).
+	s.roomCreate = &roomCreateLimiter{
+		global:     rate.NewLimiter(rate.Inf, 0),
+		perIPLimit: rate.Inf,
+		perIP:      map[string]*rate.Limiter{},
+		lastSeen:   map[string]time.Time{},
+	}
+	srv := httptest.NewServer(s.Handler())
 	defer srv.Close()
 
 	seenTokens := map[string]bool{}

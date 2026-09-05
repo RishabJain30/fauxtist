@@ -45,6 +45,7 @@ type Server struct {
 	allowedOrigins []string
 	turn           TURNConfig
 	logger         *slog.Logger
+	roomCreate     *roomCreateLimiter
 
 	// ready reflects liveness for /readyz: false until New has finished
 	// wiring routes, and flipped back to false by SetNotReady during
@@ -87,11 +88,12 @@ func WithLogger(logger *slog.Logger) Option {
 // New builds a Server with routes registered.
 func New(h *hub.Hub, opts ...Option) *Server {
 	s := &Server{
-		hub:       h,
-		mux:       http.NewServeMux(),
-		heartbeat: DefaultHeartbeatConfig(),
-		turn:      DefaultTURNConfig(),
-		logger:    slog.Default(),
+		hub:        h,
+		mux:        http.NewServeMux(),
+		heartbeat:  DefaultHeartbeatConfig(),
+		turn:       DefaultTURNConfig(),
+		logger:     slog.Default(),
+		roomCreate: newRoomCreateLimiter(),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -156,6 +158,12 @@ type createRoomResp struct {
 const maxCreateRoomBodyBytes = 4 << 10 // 4 KiB
 
 func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
+	if !s.roomCreate.allow(clientIP(r)) {
+		s.logger.Warn("room creation rate-limited", "ip", clientIP(r))
+		writeJSONError(w, http.StatusTooManyRequests, "rate_limited", "too many rooms created, slow down")
+		return
+	}
+
 	if ct, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || ct != "application/json" {
 		writeJSONError(w, http.StatusUnsupportedMediaType, "invalid_content_type", "Content-Type must be application/json")
 		return
