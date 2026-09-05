@@ -10,19 +10,24 @@ import (
 	"github.com/RishabJain30/fauxtist/internal/wsproto"
 )
 
-// Client is one player's live WebSocket connection.
+// Client is one player's live WebSocket connection. ConnID identifies this
+// specific connection instance for a seat; a later reconnect mints a new
+// Client with a new ConnID, and the old one is closed and no longer
+// authoritative for its PlayerID.
 type Client struct {
 	PlayerID game.PlayerID
+	ConnID   uint64
 	Name     string
 	Emoji    string
 	conn     *websocket.Conn
 	send     chan wsproto.Envelope
 }
 
-// newClient wraps a websocket connection.
-func newClient(id game.PlayerID, name, emoji string, conn *websocket.Conn) *Client {
+// newClient wraps a websocket connection with resolved seat identity.
+func newClient(id game.PlayerID, connID uint64, name, emoji string, conn *websocket.Conn) *Client {
 	return &Client{
 		PlayerID: id,
+		ConnID:   connID,
 		Name:     name,
 		Emoji:    emoji,
 		conn:     conn,
@@ -60,9 +65,14 @@ func (c *Client) trySend(env wsproto.Envelope) {
 	}
 }
 
-// NewClientForServer is the exported constructor used by the server package.
-func NewClientForServer(id game.PlayerID, name, emoji string, conn *websocket.Conn) *Client {
-	return newClient(id, name, emoji, conn)
+// closeReplaced closes a superseded connection so its read loop unblocks
+// immediately instead of waiting on a future read or network timeout. The
+// close handshake (which waits on the peer) runs in its own goroutine so it
+// can never stall the room's single-threaded actor loop.
+func (c *Client) closeReplaced() {
+	go func() {
+		_ = c.conn.Close(websocket.StatusNormalClosure, "replaced by reconnect")
+	}()
 }
 
 // WriteLoopForServer runs the client's write pump (exported for the server).

@@ -64,12 +64,18 @@ func TestJoinReceivesRoomState(t *testing.T) {
 	}
 
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/room/" + cr.Code
-	c := dial(t, wsURL, "Alice")
+	// Joins as a distinct player, not the host's own name ("Alice" already
+	// occupies the pre-seeded host seat).
+	c := dial(t, wsURL, "Zoe")
 	defer c.Close(websocket.StatusNormalClosure, "")
 
 	env := readEnv(t, c)
+	if env.Type != wsproto.TypeJoinAccepted {
+		t.Fatalf("first message type = %q, want join_accepted", env.Type)
+	}
+	env = readEnv(t, c)
 	if env.Type != wsproto.TypeRoomState {
-		t.Fatalf("first message type = %q, want room_state", env.Type)
+		t.Fatalf("second message type = %q, want room_state", env.Type)
 	}
 }
 
@@ -83,13 +89,16 @@ func TestStrokeBroadcastsToAllClients(t *testing.T) {
 	_ = json.NewDecoder(resp.Body).Decode(&cr)
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/room/" + cr.Code
 
-	a := dial(t, wsURL, "Alice")
+	// "Amy" and "Bob" are distinct from the host's own name ("Alice").
+	a := dial(t, wsURL, "Amy")
 	defer a.Close(websocket.StatusNormalClosure, "")
 	b := dial(t, wsURL, "Bob")
 	defer b.Close(websocket.StatusNormalClosure, "")
 
-	// Drain each client's initial room_state frame.
+	// Drain each client's join_accepted + initial room_state frames.
 	_ = readEnv(t, a)
+	_ = readEnv(t, a)
+	_ = readEnv(t, b)
 	_ = readEnv(t, b)
 
 	// A chat message from A must reach B (asserts the broadcast transport path).
@@ -160,8 +169,8 @@ func TestJoinRejectedWhenRoomFull(t *testing.T) {
 		}
 	}()
 
-	// The 9th participant (roster already 8) must be rejected: the connection
-	// is closed by the server, so a Read returns an error.
+	// The 9th participant (roster already 8) must be rejected: a structured
+	// room_full error frame, then the connection is closed by the server.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	over, _, err := websocket.Dial(ctx, wsURL, nil)
@@ -172,7 +181,20 @@ func TestJoinRejectedWhenRoomFull(t *testing.T) {
 	join, _ := wsproto.Encode(wsproto.TypeJoin, wsproto.JoinPayload{Name: "TooMany"})
 	jb, _ := json.Marshal(join)
 	_ = over.Write(ctx, websocket.MessageText, jb)
-	if _, _, err := over.Read(ctx); err == nil {
-		t.Fatal("expected rejected join to close the connection")
+
+	env := readEnv(t, over)
+	if env.Type != wsproto.TypeError {
+		t.Fatalf("type = %q, want error", env.Type)
+	}
+	var p map[string]any
+	_ = json.Unmarshal(env.Payload, &p)
+	if p["code"] != "room_full" {
+		t.Fatalf("error code = %v, want room_full", p["code"])
+	}
+
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer closeCancel()
+	if _, _, err := over.Read(closeCtx); err == nil {
+		t.Fatal("expected rejected join to close the connection after the error frame")
 	}
 }

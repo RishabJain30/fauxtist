@@ -9,20 +9,17 @@ import (
 	"time"
 
 	"github.com/RishabJain30/fauxtist/internal/game"
+	"github.com/RishabJain30/fauxtist/internal/identity"
 	"github.com/RishabJain30/fauxtist/internal/wordbank"
 	"github.com/RishabJain30/fauxtist/internal/wsproto"
 )
 
-// inbound couples a decoded envelope with its sender.
+// inbound couples a decoded envelope with the sender and the connection it
+// arrived on.
 type inbound struct {
 	from     game.PlayerID
+	connID   uint64
 	envelope wsproto.Envelope
-}
-
-// joinReq registers a client with the room loop.
-type joinReq struct {
-	client *Client
-	resp   chan error
 }
 
 // Room is the actor goroutine that owns a single game.
@@ -31,12 +28,15 @@ type Room struct {
 	engine       *game.Engine
 	clients      map[game.PlayerID]*Client
 	voicePresent map[game.PlayerID]bool
+	seats        map[game.PlayerID]seatCredential
+	nextConnID   uint64
 
-	inbox   chan inbound
-	joins   chan joinReq
-	leaves  chan game.PlayerID
-	advance chan struct{}
-	done    chan struct{}
+	inbox             chan inbound
+	joins             chan joinReq
+	leaves            chan leaveReq
+	advance           chan struct{}
+	discussionTimeout chan struct{}
+	done              chan struct{}
 
 	discussionTimer *time.Timer
 	discussionDur   time.Duration
@@ -44,24 +44,26 @@ type Room struct {
 	revealDur       time.Duration
 }
 
-// NewRoom builds a lobby-phase room. Players are added as they join (Task 12
-// creates their engine entries before the game starts); for simplicity in v1 the
-// engine is created once enough players have joined the lobby.
-func NewRoom(code string, players []game.Player, host game.PlayerID, seed int64) *Room {
+// NewRoom builds a lobby-phase room pre-seeded with its host. hostTokenHash
+// is the sha256 digest of the host's reconnect token; the raw token is never
+// held by the room.
+func NewRoom(code string, host game.Player, hostTokenHash identity.TokenHash, seed int64) *Room {
 	rng := rand.New(rand.NewSource(seed))
 	wb := wordbank.New(rand.New(rand.NewSource(seed + 1)))
 	return &Room{
-		Code:          code,
-		engine:        game.NewEngine(players, host, len(players), rng, wb),
-		clients:       map[game.PlayerID]*Client{},
-		voicePresent:  map[game.PlayerID]bool{},
-		inbox:         make(chan inbound, 64),
-		joins:         make(chan joinReq, 8),
-		leaves:        make(chan game.PlayerID, 8),
-		advance:       make(chan struct{}, 1),
-		done:          make(chan struct{}),
-		discussionDur: 45 * time.Second,
-		revealDur:     revealDuration(),
+		Code:              code,
+		engine:            game.NewEngine([]game.Player{host}, host.ID, 1, rng, wb),
+		clients:           map[game.PlayerID]*Client{},
+		voicePresent:      map[game.PlayerID]bool{},
+		seats:             map[game.PlayerID]seatCredential{host.ID: {tokenHash: hostTokenHash}},
+		inbox:             make(chan inbound, 64),
+		joins:             make(chan joinReq, 8),
+		leaves:            make(chan leaveReq, 8),
+		advance:           make(chan struct{}, 1),
+		discussionTimeout: make(chan struct{}, 1),
+		done:              make(chan struct{}),
+		discussionDur:     45 * time.Second,
+		revealDur:         revealDuration(),
 	}
 }
 
@@ -85,46 +87,32 @@ func (r *Room) Run(ctx context.Context) {
 		case <-r.done:
 			return
 		case j := <-r.joins:
-			err := r.engine.UpsertPlayer(game.Player{ID: j.client.PlayerID, Name: j.client.Name, Emoji: j.client.Emoji})
-			if err != nil {
-				j.resp <- err
-				continue
-			}
-			r.clients[j.client.PlayerID] = j.client
-			r.sendSnapshot(j.client)
-			r.broadcastLobby()
-			j.resp <- nil
+			r.processJoin(j)
 		case <-r.advance:
 			for _, ev := range r.engine.AdvanceRound() {
 				r.broadcastEvent(ev)
 			}
-		case id := <-r.leaves:
-			delete(r.clients, id)
-			if r.voicePresent[id] {
-				delete(r.voicePresent, id)
-				r.broadcastVoicePeerLeft(id)
-			}
-			r.broadcastPlayerLeft(id)
+		case <-r.discussionTimeout:
+			r.apply(r.engine.EndDiscussion(r.engine.State().HostID))
+		case lv := <-r.leaves:
+			r.processLeave(lv)
 		case msg := <-r.inbox:
-			r.handle(msg)
+			if c, ok := r.clients[msg.from]; ok && c.ConnID == msg.connID {
+				r.handle(msg)
+			}
 		}
 	}
 }
 
-// Join registers a client and blocks until the room has processed it, returning
-// any rejection (room full or game already started).
-func (r *Room) Join(c *Client) error {
-	resp := make(chan error, 1)
-	r.joins <- joinReq{client: c, resp: resp}
-	return <-resp
+// Leave unregisters a client, if its connID is still the seat's live one.
+func (r *Room) Leave(id game.PlayerID, connID uint64) {
+	r.leaves <- leaveReq{playerID: id, connID: connID}
 }
 
-// Leave unregisters a client.
-func (r *Room) Leave(id game.PlayerID) { r.leaves <- id }
-
-// Submit hands an inbound message to the loop.
-func (r *Room) Submit(from game.PlayerID, env wsproto.Envelope) {
-	r.inbox <- inbound{from: from, envelope: env}
+// Submit hands an inbound message to the loop, tagged with the connection it
+// arrived on so a superseded connection can no longer act for that seat.
+func (r *Room) Submit(from game.PlayerID, connID uint64, env wsproto.Envelope) {
+	r.inbox <- inbound{from: from, connID: connID, envelope: env}
 }
 
 // handle dispatches one inbound message to the engine and broadcasts events.

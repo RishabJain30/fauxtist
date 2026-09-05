@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
-	"strings"
 
 	"nhooyr.io/websocket"
 
@@ -18,7 +17,7 @@ import (
 	"github.com/RishabJain30/fauxtist/internal/wsproto"
 )
 
-// errBadJoin is returned when the first WS frame is not a valid join.
+// errBadJoin is returned when the first WS frame is not a valid join frame.
 var errBadJoin = errors.New("expected join frame")
 
 // Server wires HTTP routes to the hub.
@@ -49,22 +48,32 @@ type createRoomReq struct {
 	Name string `json:"name"`
 }
 
+// createRoomResp hands the host their seat credentials. ReconnectToken is
+// the raw bearer secret; the server only ever keeps its hash afterward.
 type createRoomResp struct {
-	Code string `json:"code"`
-	// HostToken lets the host claim its pre-seated seat on the WS join frame.
-	HostToken string `json:"hostToken"`
+	Code           string `json:"code"`
+	PlayerID       string `json:"playerId"`
+	ReconnectToken string `json:"reconnectToken"`
 }
 
 func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 	var req createRoomReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Name) == "" {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "name required", http.StatusBadRequest)
 		return
 	}
-	code := s.hub.CreateRoom(req.Name)
-	host, _ := s.hub.HostID(code)
+	name, err := room.ValidatePlayerName(req.Name)
+	if err != nil {
+		http.Error(w, "invalid name", http.StatusBadRequest)
+		return
+	}
+	code, playerID, token, err := s.hub.CreateRoom(name)
+	if err != nil {
+		http.Error(w, "could not create room", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(createRoomResp{Code: code, HostToken: string(host)})
+	_ = json.NewEncoder(w).Encode(createRoomResp{Code: code, PlayerID: string(playerID), ReconnectToken: token})
 }
 
 func (s *Server) joinRoom(w http.ResponseWriter, r *http.Request) {
@@ -82,44 +91,64 @@ func (s *Server) joinRoom(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 
-	// The first frame must be a join naming the player.
-	name, emoji, playerID, err := readJoin(ctx, conn, code)
+	joinReq, err := readJoinFrame(ctx, conn)
 	if err != nil {
 		conn.Close(websocket.StatusPolicyViolation, "expected join")
 		return
 	}
 
-	c := room.NewClientForServer(playerID, name, emoji, conn)
-	if err := rm.Join(c); err != nil {
+	result, err := rm.Join(conn, joinReq)
+	if err != nil {
+		sendJoinError(ctx, conn, err)
 		conn.Close(websocket.StatusPolicyViolation, "join rejected")
 		return
 	}
-	defer rm.Leave(playerID)
 
-	go c.WriteLoopForServer(ctx)
-	readLoop(ctx, conn, rm, playerID)
+	go result.Client.WriteLoopForServer(ctx)
+	defer rm.Leave(result.PlayerID, result.ConnID)
+	readLoop(ctx, conn, rm, result.PlayerID, result.ConnID)
 }
 
-// readJoin blocks for the initial join frame and resolves the player's ID. A
-// reconnect token (issued to the host via POST, and to any client for reconnect)
-// claims that exact seat; otherwise a fresh id is minted from the room + name.
-func readJoin(ctx context.Context, conn *websocket.Conn, code string) (string, string, game.PlayerID, error) {
+// readJoinFrame blocks for the initial WS frame and parses it into a join
+// (name+emoji) or reconnect (playerId+reconnectToken) request. It only
+// validates transport-level shape; business-rule validation (name format,
+// name-taken, token verification, room capacity, phase) happens in
+// room.Room.Join so failures get a structured protocol error instead of a
+// bare connection close.
+func readJoinFrame(ctx context.Context, conn *websocket.Conn) (room.JoinRequest, error) {
 	_, data, err := conn.Read(ctx)
 	if err != nil {
-		return "", "", "", err
+		return room.JoinRequest{}, err
 	}
 	var env wsproto.Envelope
 	if err := json.Unmarshal(data, &env); err != nil || env.Type != wsproto.TypeJoin {
-		return "", "", "", errBadJoin
+		return room.JoinRequest{}, errBadJoin
 	}
 	var p wsproto.JoinPayload
-	if err := json.Unmarshal(env.Payload, &p); err != nil || strings.TrimSpace(p.Name) == "" {
-		return "", "", "", errBadJoin
+	if err := json.Unmarshal(env.Payload, &p); err != nil {
+		return room.JoinRequest{}, errBadJoin
 	}
-	if p.ReconnectToken != "" {
-		return p.Name, p.Emoji, game.PlayerID(p.ReconnectToken), nil
+	if p.PlayerID != "" || p.ReconnectToken != "" {
+		return room.JoinRequest{Reconnect: true, PlayerID: game.PlayerID(p.PlayerID), Token: p.ReconnectToken}, nil
 	}
-	return p.Name, p.Emoji, game.PlayerID(code + "-" + p.Name), nil
+	return room.JoinRequest{Name: p.Name, Emoji: p.Emoji}, nil
+}
+
+// sendJoinError writes a structured error frame (message + stable code)
+// before the caller closes the connection.
+func sendJoinError(ctx context.Context, conn *websocket.Conn, err error) {
+	env, encErr := wsproto.Encode(wsproto.TypeError, wsproto.ErrorPayload{
+		Message: err.Error(),
+		Code:    room.JoinErrorCode(err),
+	})
+	if encErr != nil {
+		return
+	}
+	b, err := json.Marshal(env)
+	if err != nil {
+		return
+	}
+	_ = conn.Write(ctx, websocket.MessageText, b)
 }
 
 // allowedOrigins restricts WebSocket upgrades to the deployed host when
@@ -159,7 +188,7 @@ func trimLeadingSlash(p string) string {
 }
 
 // readLoop pumps inbound frames into the room until the connection closes.
-func readLoop(ctx context.Context, conn *websocket.Conn, rm *room.Room, id game.PlayerID) {
+func readLoop(ctx context.Context, conn *websocket.Conn, rm *room.Room, id game.PlayerID, connID uint64) {
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {
@@ -169,6 +198,6 @@ func readLoop(ctx context.Context, conn *websocket.Conn, rm *room.Room, id game.
 		if err := json.Unmarshal(data, &env); err != nil {
 			continue
 		}
-		rm.Submit(id, env)
+		rm.Submit(id, connID, env)
 	}
 }
