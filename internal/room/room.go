@@ -303,20 +303,36 @@ func (r *Room) handle(c *Client, msg inbound) {
 // apply broadcasts engine events, or ignores a per-action validation error.
 // This is the single chokepoint every engine-event-producing action routes
 // through (StartGame, AddStroke, EndDiscussion, Restart, CastVote,
-// ImpostorGuess, SkipTurn, ResolveImpostorTimeout, AdvanceRound), so it is
-// also where the room's revision advances: exactly once per accepted
-// command, even when that command cascades into several engine events or
-// several recipient-specific wire messages. A rejected command (err != nil)
-// or one that produced no events never bumps it. Returns whether anything
-// was actually applied.
+// ImpostorGuess, SkipTurn, ResolveImpostorTimeout, AdvanceRound). A
+// rejected command (err != nil) never bumps the revision at all. Returns
+// whether anything was actually applied.
 func (r *Room) apply(events []game.Event, err error) bool {
-	if err != nil || len(events) == 0 {
+	if err != nil {
 		// Validation errors are per-action; the client UI prevents most of them.
 		// Kept explicit so future logging can hook in here.
 		return false
 	}
-	r.revision++
+	return r.applyEvents(events)
+}
+
+// applyEvents broadcasts each event in order, bumping the room's revision
+// once per event rather than once per call. A single accepted command can
+// cascade into several ordered engine events (e.g. StartGame's
+// RoundStarted followed by TurnChanged, or a vote completing both
+// PhaseChanged and RoundEnded) — the frontend sequencer
+// (web/src/sequencing.js) treats each seq as exactly one applied
+// transition, so two distinct events sharing one seq would cause the
+// second to be dropped as a duplicate. Giving every event its own revision
+// keeps them individually distinguishable while every recipient of the
+// SAME event (broadcastEvent's per-client fan-out) still observes the same
+// number, since the bump happens once before that fan-out, not inside it.
+// Returns whether anything was applied.
+func (r *Room) applyEvents(events []game.Event) bool {
+	if len(events) == 0 {
+		return false
+	}
 	for _, ev := range events {
+		r.revision++
 		r.broadcastEvent(ev)
 	}
 	return true

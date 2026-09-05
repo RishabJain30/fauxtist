@@ -2,11 +2,11 @@ package server
 
 import (
 	"context"
-	"os"
-	"strconv"
 	"time"
 
 	"nhooyr.io/websocket"
+
+	"github.com/RishabJain30/fauxtist/internal/envconfig"
 )
 
 // HeartbeatConfig controls how the server checks that a connection is still
@@ -32,20 +32,20 @@ type HeartbeatConfig struct {
 // mobile-network latency and brief connectivity blips without either firing
 // pings so often they're wasteful or taking so long to notice a dead peer
 // that a disconnected player sits in limbo.
+// Values are read via envconfig.PositiveDurationMS, which rejects a
+// non-positive or unreasonably large override (a zero Interval, in
+// particular, would otherwise reach time.NewTicker and panic) rather than
+// silently applying it — main's startup validation (envconfig.Validate)
+// already fails the process before this ever runs with a bad value, so
+// the fallback to def here in that error case is defense in depth, not
+// the primary guard.
 func DefaultHeartbeatConfig() HeartbeatConfig {
+	interval, _ := envconfig.PositiveDurationMS("FAUXTIST_HEARTBEAT_INTERVAL_MS", 25*time.Second)
+	timeout, _ := envconfig.PositiveDurationMS("FAUXTIST_HEARTBEAT_TIMEOUT_MS", 10*time.Second)
 	return HeartbeatConfig{
-		Interval: envDurationMS("FAUXTIST_HEARTBEAT_INTERVAL_MS", 25*time.Second),
-		Timeout:  envDurationMS("FAUXTIST_HEARTBEAT_TIMEOUT_MS", 10*time.Second),
+		Interval: interval,
+		Timeout:  timeout,
 	}
-}
-
-func envDurationMS(key string, def time.Duration) time.Duration {
-	if ms := os.Getenv(key); ms != "" {
-		if n, err := strconv.Atoi(ms); err == nil {
-			return time.Duration(n) * time.Millisecond
-		}
-	}
-	return def
 }
 
 // runHeartbeat pings conn on cfg.Interval until ctx is done or a ping goes

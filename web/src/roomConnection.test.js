@@ -106,7 +106,7 @@ describe('createRoomConnection', () => {
     ws.open()
     ws.message(snapshotEnvelope(1))
     expect(statuses.at(-1)).toBe('connected')
-    expect(dispatched.at(-1)).toEqual({ type: STATE_SNAPSHOT_RECEIVED, payload: { phase: 'lobby', players: [], hostId: 'host-1' } })
+    expect(dispatched.at(-1)).toEqual({ type: STATE_SNAPSHOT_RECEIVED, payload: { phase: 'lobby', players: [], hostId: 'host-1' }, generation: 1 })
     conn.stop()
   })
 
@@ -128,6 +128,33 @@ describe('createRoomConnection', () => {
     ws.open()
     const sent = JSON.parse(ws.sent[0])
     expect(sent.payload).toEqual({ playerId: 'p1', reconnectToken: 'tok1' })
+    conn.stop()
+  })
+
+  // Regression coverage for useVoice.js's reconnect handling: it tells a
+  // genuine new-socket reconnect apart from a same-socket resync purely by
+  // comparing this generation number across snapshots, so it must actually
+  // change on the former and stay put on the latter.
+  it('carries a new generation on a reconnected snapshot, but not on a same-socket resync', () => {
+    const conn = setUp()
+    let ws = FakeWebSocket.instances[0]
+    ws.open()
+    ws.message(snapshotEnvelope(1))
+    const firstGeneration = dispatched.at(-1).generation
+    expect(firstGeneration).toBeTypeOf('number')
+
+    // Same socket, just a resync — generation must not move.
+    ws.message({ type: T.TurnChanged, seq: 5, payload: { currentPlayer: 'p2' } }) // gap: forces a resync
+    ws.message(snapshotEnvelope(5))
+    expect(dispatched.at(-1).generation).toBe(firstGeneration)
+
+    // A real drop and reconnect — a brand new socket — must bump it.
+    ws.serverClose()
+    vi.runOnlyPendingTimers()
+    ws = FakeWebSocket.instances[1]
+    ws.open()
+    ws.message(snapshotEnvelope(6)) // the room's revision only ever goes up, reconnect or not
+    expect(dispatched.at(-1).generation).toBeGreaterThan(firstGeneration)
     conn.stop()
   })
 
@@ -294,7 +321,33 @@ describe('createRoomConnection', () => {
 
     ws.message(snapshotEnvelope(5, { phase: 'drawing', players: [], hostId: 'host-1', currentPlayer: 'p2' }))
     expect(statuses.at(-1)).toBe('connected')
-    expect(dispatched.at(-1)).toEqual({ type: STATE_SNAPSHOT_RECEIVED, payload: { phase: 'drawing', players: [], hostId: 'host-1', currentPlayer: 'p2' } })
+    expect(dispatched.at(-1)).toEqual({ type: STATE_SNAPSHOT_RECEIVED, payload: { phase: 'drawing', players: [], hostId: 'host-1', currentPlayer: 'p2' }, generation: 1 })
+    conn.stop()
+  })
+
+  // Regression: the server used to bump its revision once per accepted
+  // command instead of once per event, so a command that cascades into
+  // several ordered events (e.g. starting a game emits round_started then
+  // turn_changed) stamped every event in the cascade with the same seq.
+  // This sequencer correctly treated the second event as a duplicate of
+  // the first and silently dropped it — so drove the actual real-world bug
+  // this reproduces at the one layer (roomConnection -> decideSequence ->
+  // onDispatch) that a real browser client actually runs. See
+  // internal/room/sequencing_test.go for the server-side half, which
+  // verifies the fix that makes seq strictly increase per event.
+  it('applies every event in a multi-event cascade, not just the first', () => {
+    const conn = setUp()
+    const ws = FakeWebSocket.instances[0]
+    ws.open()
+    ws.message(snapshotEnvelope(1))
+
+    ws.message({ type: T.RoundStarted, seq: 2, payload: { round: 1, category: 'animals', order: ['p1'] } })
+    ws.message({ type: T.TurnChanged, seq: 3, payload: { currentPlayer: 'p1', lap: 0, totalLaps: 2 } })
+
+    expect(dispatched.filter((a) => a.type === T.RoundStarted)).toHaveLength(1)
+    expect(dispatched.filter((a) => a.type === T.TurnChanged)).toHaveLength(1)
+    expect(dispatched.at(-1).seq).toBe(3)
+    expect(dispatched.at(-1).payload).toEqual({ currentPlayer: 'p1', lap: 0, totalLaps: 2 })
     conn.stop()
   })
 

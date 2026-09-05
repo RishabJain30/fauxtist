@@ -1,9 +1,9 @@
 package room
 
 import (
-	"os"
-	"strconv"
 	"time"
+
+	"github.com/RishabJain30/fauxtist/internal/envconfig"
 )
 
 // Durations configures how long a room waits before treating something as
@@ -40,21 +40,23 @@ type Durations struct {
 //	FAUXTIST_RECONNECT_GRACE_MS
 //	FAUXTIST_DISCONNECTED_TURN_MS
 //	FAUXTIST_IMPOSTOR_GUESS_MS
+//
+// Values are read via envconfig.PositiveDurationMS, which rejects a
+// non-positive or unreasonably large override rather than silently
+// applying it — main's startup validation (envconfig.Validate) already
+// fails the process before this ever runs with a bad value, so the
+// fallback to def here in that error case is defense in depth, not the
+// primary guard.
 func DefaultDurations() Durations {
+	reveal, _ := envconfig.PositiveDurationMS("FAUXTIST_REVEAL_MS", 6*time.Second)
+	reconnect, _ := envconfig.PositiveDurationMS("FAUXTIST_RECONNECT_GRACE_MS", 60*time.Second)
+	disconnectedTurn, _ := envconfig.PositiveDurationMS("FAUXTIST_DISCONNECTED_TURN_MS", 10*time.Second)
+	impostorGuess, _ := envconfig.PositiveDurationMS("FAUXTIST_IMPOSTOR_GUESS_MS", 30*time.Second)
 	return Durations{
 		Discussion:       45 * time.Second,
-		Reveal:           envDurationMS("FAUXTIST_REVEAL_MS", 6*time.Second),
-		Reconnect:        envDurationMS("FAUXTIST_RECONNECT_GRACE_MS", 60*time.Second),
-		DisconnectedTurn: envDurationMS("FAUXTIST_DISCONNECTED_TURN_MS", 10*time.Second),
-		ImpostorGuess:    envDurationMS("FAUXTIST_IMPOSTOR_GUESS_MS", 30*time.Second),
+		Reveal:           reveal,
+		Reconnect:        reconnect,
+		DisconnectedTurn: disconnectedTurn,
+		ImpostorGuess:    impostorGuess,
 	}
-}
-
-func envDurationMS(key string, def time.Duration) time.Duration {
-	if ms := os.Getenv(key); ms != "" {
-		if n, err := strconv.Atoi(ms); err == nil {
-			return time.Duration(n) * time.Millisecond
-		}
-	}
-	return def
 }

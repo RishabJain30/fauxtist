@@ -1,9 +1,9 @@
 package hub
 
 import (
-	"os"
-	"strconv"
 	"time"
+
+	"github.com/RishabJain30/fauxtist/internal/envconfig"
 )
 
 // Config controls room lifecycle limits. Zero values are never used
@@ -30,28 +30,21 @@ type Config struct {
 //	FAUXTIST_EMPTY_ROOM_TTL_MS
 //	FAUXTIST_ROOM_SWEEP_INTERVAL_MS
 //	FAUXTIST_MAX_ROOMS
+//
+// Values are read via envconfig.PositiveDurationMS/PositiveInt, which
+// reject a non-positive or unreasonably large override (a zero
+// SweepInterval, in particular, would otherwise reach time.NewTicker and
+// panic) rather than silently applying it — main's startup validation
+// (envconfig.Validate) already fails the process before this ever runs
+// with a bad value, so the fallback to def here in that error case is
+// defense in depth, not the primary guard.
 func DefaultConfig() Config {
+	emptyRoomTTL, _ := envconfig.PositiveDurationMS("FAUXTIST_EMPTY_ROOM_TTL_MS", 15*time.Minute)
+	sweepInterval, _ := envconfig.PositiveDurationMS("FAUXTIST_ROOM_SWEEP_INTERVAL_MS", 1*time.Minute)
+	maxRooms, _ := envconfig.PositiveInt("FAUXTIST_MAX_ROOMS", 500)
 	return Config{
-		EmptyRoomTTL:  envDurationMS("FAUXTIST_EMPTY_ROOM_TTL_MS", 15*time.Minute),
-		SweepInterval: envDurationMS("FAUXTIST_ROOM_SWEEP_INTERVAL_MS", 1*time.Minute),
-		MaxRooms:      envInt("FAUXTIST_MAX_ROOMS", 500),
+		EmptyRoomTTL:  emptyRoomTTL,
+		SweepInterval: sweepInterval,
+		MaxRooms:      maxRooms,
 	}
-}
-
-func envDurationMS(key string, def time.Duration) time.Duration {
-	if ms := os.Getenv(key); ms != "" {
-		if n, err := strconv.Atoi(ms); err == nil && n >= 0 {
-			return time.Duration(n) * time.Millisecond
-		}
-	}
-	return def
-}
-
-func envInt(key string, def int) int {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return n
-		}
-	}
-	return def
 }

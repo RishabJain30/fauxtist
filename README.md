@@ -188,6 +188,11 @@ until it's explicitly shut down or the sweeper reaps it:
 - **Capacity**: at most `FAUXTIST_MAX_ROOMS` rooms may exist at once;
   `POST /api/rooms` past that returns `503` with
   `{"code": "capacity_reached"}`.
+- **Room-creation rate limiting**: `POST /api/rooms` is rate-limited per
+  client address (a small burst, then one every 10s) plus one modest
+  global bucket, so a single script can't create enough rooms to exhaust
+  `FAUXTIST_MAX_ROOMS` and lock out real players. A rejected request
+  returns `429` with `{"code": "rate_limited"}` and creates no room.
 - **Shutdown**: an expired or explicitly closed room cancels its timers
   and closes every connected client with close code `4003`
   (`room_closed` — see [docs/protocol.md](./docs/protocol.md#close-codes));
