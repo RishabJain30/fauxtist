@@ -34,6 +34,8 @@ type Hub struct {
 	cfg   Config
 	clock func() time.Time
 
+	roomOpts []room.RoomOption
+
 	sweepStop chan struct{}
 	sweepDone chan struct{}
 	closeOnce sync.Once
@@ -53,6 +55,13 @@ func WithConfig(cfg Config) Option {
 // deterministically instead of sleeping; production never sets it.
 func WithClock(clock func() time.Time) Option {
 	return func(h *Hub) { h.clock = clock }
+}
+
+// WithRoomOptions applies extra RoomOptions to every room the hub creates.
+// Tests use this to shrink phase durations (room.WithPhaseDuration) so a full
+// match runs in milliseconds; production leaves it empty.
+func WithRoomOptions(opts ...room.RoomOption) Option {
+	return func(h *Hub) { h.roomOpts = append(h.roomOpts, opts...) }
 }
 
 // New creates an empty hub and starts its background sweeper, which
@@ -103,7 +112,8 @@ func (h *Hub) CreateRoom(hostName, hostEmoji string) (code string, hostID game.P
 	h.seq++
 	seed := time.Now().UnixNano() + h.seq
 	host := game.Player{ID: game.PlayerID(playerID), Name: hostName, Emoji: hostEmoji}
-	r := room.NewRoom(code, host, identity.Hash(token), seed, room.DefaultDurations(), room.WithClock(h.clock))
+	opts := append([]room.RoomOption{room.WithClock(h.clock)}, h.roomOpts...)
+	r := room.NewRoom(code, host, identity.Hash(token), seed, room.DefaultDurations(), opts...)
 	ctx, cancel := context.WithCancel(context.Background())
 	go r.Run(ctx)
 	h.rooms[code] = &entry{room: r, cancel: cancel, seed: seed}

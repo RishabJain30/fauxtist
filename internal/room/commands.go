@@ -208,9 +208,11 @@ func (r *Room) handleChat(c *Client, msg inbound) {
 
 func (r *Room) handleLeaveForNow(c *Client, msg inbound) {
 	// Leave for now keeps the seat and credential; it is just an early
-	// disconnect. Their faction auto-Holds via the phase deadline.
+	// disconnect. Their faction auto-Holds via the phase deadline. We only
+	// acknowledge — the client closes the socket itself as it returns home,
+	// which is what triggers markDisconnected (via processLeave). Closing the
+	// socket here would race the write pump and drop this very ack.
 	r.sendLeaveAccepted(c)
-	c.close(closeNormal, "left for now")
 }
 
 func (r *Room) handleResign(c *Client, msg inbound) {
@@ -232,7 +234,11 @@ func (r *Room) handleResign(c *Client, msg inbound) {
 	r.broadcastPlayerExited(c.PlayerID, true)
 	r.maybeMigrateHost()
 	r.sendLeaveAccepted(c)
-	c.close(closeNormal, "resigned")
+	// Drop the seat's live connection from the roster so the room no longer
+	// counts it as present (it can idle-expire, and this forfeited socket
+	// can't act). We do NOT close the socket here — that would race the write
+	// pump and drop the ack above; the client closes it as it returns home.
+	delete(r.clients, c.PlayerID)
 
 	if r.engine.EndForfeitIfAlone() {
 		r.endMatchNow()
