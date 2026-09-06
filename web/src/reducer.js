@@ -1,48 +1,39 @@
 import { T } from './protocol.js'
 
-// Dispatched locally by useRoomSocket (never sent by the server) when a
-// join/reconnect attempt is rejected and the socket closes before ever
-// reaching a snapshot, so the UI can stop showing "Connecting…" forever.
+// Local-only actions (never sent by the server), dispatched by the connection
+// controller so the UI can react to connection-level events.
 export const LOCAL_JOIN_FAILED = 'local:join_failed'
-
-// Dispatched locally by useRoomSocket once it has decided (via
-// sequencing.js) that an incoming state_snapshot is safe to apply — the
-// single atomic, full-state-replacing action. Everything the UI needs for
-// every phase comes from this one action; no other action may leave the
-// screen showing a mix of two different snapshots' worth of state.
 export const STATE_SNAPSHOT_RECEIVED = 'local:state_snapshot_received'
-
-// Dispatched locally by Voting.jsx the moment it sends cast_vote, so a
-// refresh or resync a moment later doesn't show the vote buttons as if
-// nothing had been sent yet. The next snapshot's authoritative hasVoted
-// always overwrites this — it's purely to bridge the gap between sending
-// and the server's own broadcast confirming it.
-export const LOCAL_VOTE_CAST = 'local:vote_cast'
 
 export function initialState() {
   return {
     phase: 'connecting',
-    players: [],
-    hostId: null,
-    you: null,
+    phaseDeadlineMs: null,
+    earlyDeadlineMs: null,
+    paused: false,
     round: 0,
     totalRounds: 0,
-    category: '',
-    word: null,
-    youAreImpostor: false,
-    currentPlayer: null,
-    lap: 0,
-    totalLaps: 2,
-    strokes: [],
-    discussionDeadlineMs: null,
-    hasVoted: false,
-    votesCast: 0,
-    votesTotal: 0,
-    voteTargets: [],
-    lastResult: null,
-    guessDeadlineMs: null,
-    finalScores: null,
+    preset: 'standard',
+    mapId: null,
+    hostId: null,
+    role: 'player',
+    me: null,
+    you: null,
+    players: [],
+    spectators: [],
+    board: [],
     chat: [],
+    myDeclaration: null,
+    myOrders: null,
+    declarationsIn: 0,
+    ordersSubmitted: 0,
+    ordersLocked: 0,
+    requiredCount: 0,
+    revealedDeclarations: [],
+    resolution: null,
+    roundSummary: null,
+    result: null,
+    rematchReady: [],
     error: null,
     errorCode: null,
     voicePeers: [],
@@ -50,34 +41,38 @@ export function initialState() {
   }
 }
 
-// snapshotToState maps a state_snapshot payload onto every "core" field
-// initialState defines, explicitly defaulting whatever the payload didn't
-// include for the current phase — so applying a snapshot is a genuine
-// full replace, never a merge that could leave a stale field over from
-// whatever phase the client was previously in.
+// snapshotToState maps a state_snapshot payload onto every core field, so
+// applying a snapshot is a genuine full replace, never a merge that could
+// leave a stale field from a previous phase.
 function snapshotToState(p) {
   return {
     phase: p.phase,
-    players: p.players || [],
-    hostId: p.hostId ?? null,
-    you: p.you ?? null,
+    phaseDeadlineMs: p.phaseDeadlineMs ?? null,
+    earlyDeadlineMs: p.earlyDeadlineMs ?? null,
+    paused: !!p.paused,
     round: p.round ?? 0,
     totalRounds: p.totalRounds ?? 0,
-    category: p.category || '',
-    word: p.word ?? null,
-    youAreImpostor: !!p.youAreImpostor,
-    currentPlayer: p.currentPlayer ?? null,
-    lap: p.lap ?? 0,
-    totalLaps: p.totalLaps ?? 2,
-    strokes: p.strokes || [],
-    discussionDeadlineMs: p.discussionDeadlineMs ?? null,
-    hasVoted: !!p.hasVoted,
-    votesCast: p.votesCast ?? 0,
-    votesTotal: p.votesTotal ?? 0,
-    voteTargets: p.voteTargets || [],
-    lastResult: p.lastResult ?? null,
-    guessDeadlineMs: p.guessDeadlineMs ?? null,
-    finalScores: p.finalScores ?? null,
+    preset: p.preset || 'standard',
+    mapId: p.mapId ?? null,
+    hostId: p.hostId ?? null,
+    role: p.role || 'player',
+    me: p.me ?? null,
+    you: p.you ?? null,
+    players: p.players || [],
+    spectators: p.spectators || [],
+    board: p.board || [],
+    chat: p.chat || [],
+    myDeclaration: p.myDeclaration ?? null,
+    myOrders: p.myOrders ?? null,
+    declarationsIn: p.declarationsIn ?? 0,
+    ordersSubmitted: p.ordersSubmitted ?? 0,
+    ordersLocked: p.ordersLocked ?? 0,
+    requiredCount: p.requiredCount ?? 0,
+    revealedDeclarations: p.revealedDeclarations || [],
+    resolution: p.resolution ?? null,
+    roundSummary: p.resolution?.summary ?? null,
+    result: p.result ?? null,
+    rematchReady: p.rematchReady || [],
     error: null,
     errorCode: null,
   }
@@ -87,70 +82,111 @@ export function reduce(state, msg) {
   const p = msg.payload || {}
   switch (msg.type) {
     case STATE_SNAPSHOT_RECEIVED:
-      // Local-only UI state that a snapshot has no opinion on and would
-      // otherwise be lost for no reason: chat history (not part of the
-      // reconstructible game state) and voice presence (its own
-      // independent join/leave protocol, out of scope for this
-      // milestone).
-      return { ...snapshotToState(p), chat: state.chat, voicePeers: state.voicePeers, voiceStates: state.voiceStates }
-    case T.LobbyUpdate:
-      return { ...state, players: p.players || [], hostId: p.hostId ?? state.hostId }
-    case T.PlayerLeft:
-      // The player was actually removed from the roster (lobby-only, after
-      // their reconnect grace expired) — not just marked disconnected.
-      return { ...state, players: state.players.filter((pl) => pl.id !== p.id) }
-    case T.PlayerPresenceChanged:
-      return { ...state, players: state.players.map((pl) => (pl.id === p.id ? { ...pl, connected: p.connected } : pl)) }
-    case T.HostChanged:
-      return { ...state, hostId: p.hostId }
-    case T.RoundStarted:
+      // Preserve voice presence (its own independent protocol) across the
+      // full replace.
+      return { ...snapshotToState(p), voicePeers: state.voicePeers, voiceStates: state.voiceStates }
+
+    case T.PhaseChanged:
       return {
         ...state,
-        phase: 'drawing',
-        round: p.round,
-        category: p.category,
-        word: p.word ?? null,
-        youAreImpostor: !!p.youAreImpostor,
-        strokes: [],
-        lastResult: null,
-        hasVoted: false,
-        votesCast: 0,
-        votesTotal: 0,
+        phase: p.phase,
+        round: p.round ?? state.round,
+        totalRounds: p.totalRounds ?? state.totalRounds,
+        paused: !!p.paused,
+        phaseDeadlineMs: p.phaseDeadlineMs ?? null,
+        earlyDeadlineMs: null,
+        // A new phase clears the previous phase's transient reveal/summary.
+        revealedDeclarations: p.phase === 'declaration' ? [] : state.revealedDeclarations,
       }
-    case T.StrokeBroadcast:
-      return { ...state, strokes: [...state.strokes, p] }
-    case T.TurnChanged:
-      return { ...state, currentPlayer: p.currentPlayer, lap: p.lap, totalLaps: p.totalLaps }
-    case T.PhaseChanged:
-      return { ...state, phase: p.phase }
-    case T.VoteUpdate:
-      return { ...state, votesCast: p.votesCast, votesTotal: p.votesTotal }
-    case LOCAL_VOTE_CAST:
-      return { ...state, hasVoted: true }
-    case T.RoundResult:
-      return { ...state, lastResult: p, phase: 'reveal', guessDeadlineMs: p.guessDeadlineMs ?? null }
+
+    case T.DeclarationStatus:
+      return { ...state, declarationsIn: p.submitted ?? 0, requiredCount: p.required ?? state.requiredCount, earlyDeadlineMs: p.earlyDeadlineMs ?? state.earlyDeadlineMs }
+
+    case T.DeclarationsRevealed:
+      return { ...state, revealedDeclarations: p.declarations || [] }
+
+    case T.PlanningStatus:
+      return {
+        ...state,
+        ordersSubmitted: p.submitted ?? 0,
+        ordersLocked: p.locked ?? 0,
+        requiredCount: p.required ?? state.requiredCount,
+        earlyDeadlineMs: p.earlyDeadlineMs ?? state.earlyDeadlineMs,
+      }
+
+    case T.OrdersSaved:
+      return { ...state, myOrders: { faux: !!p.faux, commands: p.commands || [], locked: !!p.locked } }
+
+    case T.RoundResolved:
+      // round_resolved carries the final authoritative board for the round —
+      // apply it so the map stays current (later phases only send
+      // phase_changed, not a full board).
+      return { ...state, resolution: p.resolution ?? null, board: p.resolution?.board ?? state.board }
+
+    case T.RoundSummary:
+      return { ...state, roundSummary: p.summary ?? null }
+
+    case T.LobbyUpdate:
+      return {
+        ...state,
+        players: p.players || [],
+        spectators: p.spectators || state.spectators,
+        hostId: p.hostId ?? state.hostId,
+        preset: p.preset || state.preset,
+        totalRounds: p.totalRounds ?? state.totalRounds,
+      }
+
+    case T.SettingsChanged:
+      return { ...state, preset: p.preset || state.preset, totalRounds: p.totalRounds ?? state.totalRounds }
+
+    case T.PlayerPresenceChanged:
+      return { ...state, players: state.players.map((pl) => (pl.id === p.id ? { ...pl, connected: p.connected } : pl)) }
+
+    case T.PlayerAFKChanged:
+      return { ...state, players: state.players.map((pl) => (pl.id === p.id ? { ...pl, afk: p.afk } : pl)) }
+
+    case T.PlayerExited:
+      return { ...state, players: state.players.filter((pl) => pl.id !== p.id) }
+
+    case T.HostChanged:
+      return { ...state, hostId: p.hostId }
+
+    case T.SpectatorUpdate:
+      return { ...state, spectators: p.spectators || [] }
+
+    case T.RematchStatus:
+      return { ...state, rematchReady: p.ready || [] }
+
     case T.GameOver:
-      return { ...state, phase: 'game_over', finalScores: p.finalScores || [] }
+      return { ...state, phase: 'game_over', result: p.result ?? state.result }
+
     case T.ChatBroadcast:
       return { ...state, chat: [...state.chat, p] }
+
     case T.Error:
       return { ...state, error: p.message, errorCode: p.code }
+
     case LOCAL_JOIN_FAILED:
       return { ...state, phase: 'join_failed' }
+
     case T.VoicePeers:
       return { ...state, voicePeers: p.ids || [] }
+
     case T.VoicePeerJoined:
       return {
         ...state,
         voicePeers: state.voicePeers.includes(p.id) ? state.voicePeers : [...state.voicePeers, p.id],
       }
+
     case T.VoicePeerLeft: {
       const voiceStates = { ...state.voiceStates }
       delete voiceStates[p.id]
       return { ...state, voicePeers: state.voicePeers.filter((id) => id !== p.id), voiceStates }
     }
+
     case T.VoiceState:
       return { ...state, voiceStates: { ...state.voiceStates, [p.id]: { muted: p.muted, speaking: p.speaking } } }
+
     default:
       return state
   }

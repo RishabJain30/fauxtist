@@ -1,7 +1,7 @@
 import { T, encodeCommand, parseServerMessage } from './protocol.js'
 import { decideSequence } from './sequencing.js'
 import { loadCredentials, saveCredentials, clearCredentials } from './credentials.js'
-import { LOCAL_JOIN_FAILED, LOCAL_VOTE_CAST, STATE_SNAPSHOT_RECEIVED } from './reducer.js'
+import { LOCAL_JOIN_FAILED, STATE_SNAPSHOT_RECEIVED } from './reducer.js'
 
 // Roughly immediate, 500ms, 1s, 2s, 4s, then capped at 10s — each with
 // jitter applied so many clients dropped by the same event don't all
@@ -20,6 +20,7 @@ export const FATAL_ERROR_CODES = new Set([
   'invalid_reconnect',
   'name_taken',
   'room_full',
+  'spectators_full',
   'game_started',
   'invalid_join',
   'unsupported_version',
@@ -99,9 +100,12 @@ export function createRoomConnection(code, join, handlers, deps = {}) {
   }
 
   function joinPayload() {
-    return creds.playerId
-      ? { playerId: creds.playerId, reconnectToken: creds.reconnectToken }
-      : { name: creds.name, emoji: creds.emoji }
+    if (creds.playerId) {
+      return { playerId: creds.playerId, reconnectToken: creds.reconnectToken }
+    }
+    const payload = { name: creds.name, emoji: creds.emoji }
+    if (creds.asSpectator) payload.asSpectator = true
+    return payload
   }
 
   function scheduleRetry() {
@@ -135,10 +139,10 @@ export function createRoomConnection(code, join, handlers, deps = {}) {
       if (!env) return
 
       if (env.type === T.JoinAccepted) {
-        const { playerId, reconnectToken } = env.payload
+        const { playerId, reconnectToken, spectator } = env.payload
         creds = { playerId, reconnectToken }
         saveCredentials(code, playerId, reconnectToken, storage)
-        onIdentity({ playerId, reconnectToken })
+        onIdentity({ playerId, reconnectToken, spectator: !!spectator })
         return
       }
 
@@ -210,7 +214,6 @@ export function createRoomConnection(code, join, handlers, deps = {}) {
       if (status !== 'connected' || !ws || ws.readyState !== WebSocketImpl.OPEN) return
       const { raw } = encodeCommand(type, payload)
       ws.send(raw)
-      if (type === T.CastVote) onDispatch({ type: LOCAL_VOTE_CAST })
     },
     stop() {
       stopped = true

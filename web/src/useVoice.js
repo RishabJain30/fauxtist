@@ -199,14 +199,17 @@ export function useVoice({ meId, send, subscribe }) {
     }
   }, [send, sendState, startSpeakingDetection, waitForIceConfig])
 
-  const toggleMute = useCallback(() => {
+  const setMicMuted = useCallback((m) => {
     if (!activeRef.current) return
-    const m = !mutedRef.current
     mutedRef.current = m
     setMuted(m)
     localStream.current?.getAudioTracks().forEach((t) => (t.enabled = !m))
     sendState(m, m ? false : speakingRef.current)
   }, [sendState])
+
+  const toggleMute = useCallback(() => {
+    setMicMuted(!mutedRef.current)
+  }, [setMicMuted])
 
   useEffect(() => {
     return () => {
@@ -218,5 +221,5 @@ export function useVoice({ meId, send, subscribe }) {
     }
   }, [send, closeAllPeers])
 
-  return { active, muted, speaking, error, enable, toggleMute }
+  return { active, muted, speaking, error, enable, toggleMute, setMicMuted }
 }

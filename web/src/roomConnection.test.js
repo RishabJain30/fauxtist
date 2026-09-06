@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createRoomConnection, backoffDelay, BACKOFF_DELAYS_MS } from './roomConnection.js'
 import { T, PROTOCOL_VERSION } from './protocol.js'
-import { STATE_SNAPSHOT_RECEIVED, LOCAL_JOIN_FAILED, LOCAL_VOTE_CAST } from './reducer.js'
+import { STATE_SNAPSHOT_RECEIVED, LOCAL_JOIN_FAILED } from './reducer.js'
 
 // A minimal fake WebSocket standing in for the real browser API: tests
 // drive it explicitly (open/message/serverClose) instead of a real socket
@@ -42,8 +42,12 @@ function memoryStorage() {
   const m = new Map()
   return {
     getItem: (k) => (m.has(k) ? m.get(k) : null),
-    setItem: (k, v) => m.set(k, v),
+    setItem: (k, v) => m.set(k, String(v)),
     removeItem: (k) => m.delete(k),
+    key: (i) => [...m.keys()][i] ?? null,
+    get length() {
+      return m.size
+    },
   }
 }
 
@@ -110,6 +114,39 @@ describe('createRoomConnection', () => {
     conn.stop()
   })
 
+  // --- identity from join_accepted, including spectator seats ---
+
+  it('reports identity (playerId, reconnectToken, spectator=false) on a normal join_accepted', () => {
+    const conn = setUp({ name: 'Alice', emoji: '🦊' })
+    const ws = FakeWebSocket.instances[0]
+    ws.open()
+    ws.message({ type: T.JoinAccepted, payload: { playerId: 'p1', reconnectToken: 'tok1' } })
+    expect(identities.at(-1)).toEqual({ playerId: 'p1', reconnectToken: 'tok1', spectator: false })
+    conn.stop()
+  })
+
+  it('reports spectator:true on a spectator join_accepted', () => {
+    const conn = setUp({ name: 'Sam', emoji: '👀', asSpectator: true })
+    const ws = FakeWebSocket.instances[0]
+    ws.open()
+    ws.message({ type: T.JoinAccepted, payload: { playerId: 'sp1', reconnectToken: 'tok', spectator: true } })
+    expect(identities.at(-1)).toEqual({ playerId: 'sp1', reconnectToken: 'tok', spectator: true })
+    conn.stop()
+  })
+
+  it('persists seat credentials to storage on join_accepted', () => {
+    const conn = setUp()
+    const ws = FakeWebSocket.instances[0]
+    ws.open()
+    ws.message({ type: T.JoinAccepted, payload: { playerId: 'p1', reconnectToken: 'tok1' } })
+    const raw = storage.getItem('fauxlands:credentials:ROOM')
+    expect(raw).toBeTruthy()
+    const saved = JSON.parse(raw)
+    expect(saved.playerId).toBe('p1')
+    expect(saved.reconnectToken).toBe('tok1')
+    conn.stop()
+  })
+
   // --- Requirement #18: reconnect reuses credentials, never a new player ---
 
   it('reuses seat credentials from join_accepted on every subsequent reconnect, never the original name/emoji', () => {
@@ -118,7 +155,7 @@ describe('createRoomConnection', () => {
     ws.open()
     ws.message({ type: T.JoinAccepted, payload: { playerId: 'p1', reconnectToken: 'tok1' } })
     ws.message(snapshotEnvelope(1))
-    expect(identities.at(-1)).toEqual({ playerId: 'p1', reconnectToken: 'tok1' })
+    expect(identities.at(-1)).toEqual({ playerId: 'p1', reconnectToken: 'tok1', spectator: false })
 
     // Unexpected drop — the automatic reconnect must send the seat's
     // credentials, not another fresh join with the original name.
@@ -144,7 +181,7 @@ describe('createRoomConnection', () => {
     expect(firstGeneration).toBeTypeOf('number')
 
     // Same socket, just a resync — generation must not move.
-    ws.message({ type: T.TurnChanged, seq: 5, payload: { currentPlayer: 'p2' } }) // gap: forces a resync
+    ws.message({ type: T.PhaseChanged, seq: 5, payload: { phase: 'planning' } }) // gap: forces a resync
     ws.message(snapshotEnvelope(5))
     expect(dispatched.at(-1).generation).toBe(firstGeneration)
 
@@ -185,7 +222,7 @@ describe('createRoomConnection', () => {
   // --- Requirement #17: fatal errors stop retrying ---
 
   it('does not retry after a fatal invalid_reconnect rejection, and clears stored credentials', () => {
-    storage.setItem('fauxtist:credentials:ROOM', JSON.stringify({ playerId: 'p1', reconnectToken: 'stale' }))
+    storage.setItem('fauxlands:credentials:ROOM', JSON.stringify({ playerId: 'p1', reconnectToken: 'stale' }))
     const conn = setUp({ playerId: 'p1', reconnectToken: 'stale' })
 
     const ws = FakeWebSocket.instances[0]
@@ -195,7 +232,21 @@ describe('createRoomConnection', () => {
 
     expect(statuses.at(-1)).toBe('failed')
     expect(dispatched.some((a) => a.type === LOCAL_JOIN_FAILED)).toBe(true)
-    expect(storage.getItem('fauxtist:credentials:ROOM')).toBeNull()
+    expect(storage.getItem('fauxlands:credentials:ROOM')).toBeNull()
+    vi.runAllTimers()
+    expect(FakeWebSocket.instances.length).toBe(1) // never retried
+    conn.stop()
+  })
+
+  it('treats a spectators_full error as fatal and never retries', () => {
+    const conn = setUp({ name: 'Sam', emoji: '👀', asSpectator: true })
+    const ws = FakeWebSocket.instances[0]
+    ws.open()
+    ws.message({ type: T.Error, payload: { message: 'no spectator slots left', code: 'spectators_full' } })
+    ws.serverClose()
+
+    expect(statuses.at(-1)).toBe('failed')
+    expect(dispatched.some((a) => a.type === LOCAL_JOIN_FAILED)).toBe(true)
     vi.runAllTimers()
     expect(FakeWebSocket.instances.length).toBe(1) // never retried
     conn.stop()
@@ -291,19 +342,9 @@ describe('createRoomConnection', () => {
 
     // A sequence gap flips us to resyncing; sends must be dropped again
     // until the fresh snapshot is applied.
-    ws.message({ type: T.TurnChanged, seq: 99, payload: { currentPlayer: 'x' } })
+    ws.message({ type: T.PhaseChanged, seq: 99, payload: { phase: 'planning' } })
     conn.send('chat_message', { text: 'mid-resync' })
     expect(ws.sent).toHaveLength(3) // the resync request itself, no new chat frame
-    conn.stop()
-  })
-
-  it('marks hasVoted locally the moment a vote is sent', () => {
-    const conn = setUp()
-    const ws = FakeWebSocket.instances[0]
-    ws.open()
-    ws.message(snapshotEnvelope(1))
-    conn.send('cast_vote', { target: 'p2' })
-    expect(dispatched.some((a) => a.type === LOCAL_VOTE_CAST)).toBe(true)
     conn.stop()
   })
 
@@ -314,40 +355,37 @@ describe('createRoomConnection', () => {
     const ws = FakeWebSocket.instances[0]
     ws.open()
     ws.message(snapshotEnvelope(1))
-    ws.message({ type: T.TurnChanged, seq: 5, payload: { currentPlayer: 'p2' } }) // gap: expected 2
+    ws.message({ type: T.PhaseChanged, seq: 5, payload: { phase: 'planning' } }) // gap: expected 2
     expect(statuses.at(-1)).toBe('resyncing')
     const resyncReq = JSON.parse(ws.sent.at(-1))
     expect(resyncReq.type).toBe(T.Resync)
 
-    ws.message(snapshotEnvelope(5, { phase: 'drawing', players: [], hostId: 'host-1', currentPlayer: 'p2' }))
+    ws.message(snapshotEnvelope(5, { phase: 'planning', players: [], hostId: 'host-1' }))
     expect(statuses.at(-1)).toBe('connected')
-    expect(dispatched.at(-1)).toEqual({ type: STATE_SNAPSHOT_RECEIVED, payload: { phase: 'drawing', players: [], hostId: 'host-1', currentPlayer: 'p2' }, generation: 1 })
+    expect(dispatched.at(-1)).toEqual({ type: STATE_SNAPSHOT_RECEIVED, payload: { phase: 'planning', players: [], hostId: 'host-1' }, generation: 1 })
     conn.stop()
   })
 
   // Regression: the server used to bump its revision once per accepted
   // command instead of once per event, so a command that cascades into
-  // several ordered events (e.g. starting a game emits round_started then
-  // turn_changed) stamped every event in the cascade with the same seq.
-  // This sequencer correctly treated the second event as a duplicate of
-  // the first and silently dropped it — so drove the actual real-world bug
-  // this reproduces at the one layer (roomConnection -> decideSequence ->
-  // onDispatch) that a real browser client actually runs. See
-  // internal/room/sequencing_test.go for the server-side half, which
-  // verifies the fix that makes seq strictly increase per event.
+  // several ordered events stamped every event in the cascade with the same
+  // seq. This sequencer correctly treated the second event as a duplicate of
+  // the first and silently dropped it. This exercises that path at the one
+  // layer (roomConnection -> decideSequence -> onDispatch) a real browser
+  // client runs.
   it('applies every event in a multi-event cascade, not just the first', () => {
     const conn = setUp()
     const ws = FakeWebSocket.instances[0]
     ws.open()
     ws.message(snapshotEnvelope(1))
 
-    ws.message({ type: T.RoundStarted, seq: 2, payload: { round: 1, category: 'animals', order: ['p1'] } })
-    ws.message({ type: T.TurnChanged, seq: 3, payload: { currentPlayer: 'p1', lap: 0, totalLaps: 2 } })
+    ws.message({ type: T.PhaseChanged, seq: 2, payload: { phase: 'declaration', round: 1 } })
+    ws.message({ type: T.DeclarationStatus, seq: 3, payload: { submitted: 0, required: 4 } })
 
-    expect(dispatched.filter((a) => a.type === T.RoundStarted)).toHaveLength(1)
-    expect(dispatched.filter((a) => a.type === T.TurnChanged)).toHaveLength(1)
+    expect(dispatched.filter((a) => a.type === T.PhaseChanged)).toHaveLength(1)
+    expect(dispatched.filter((a) => a.type === T.DeclarationStatus)).toHaveLength(1)
     expect(dispatched.at(-1).seq).toBe(3)
-    expect(dispatched.at(-1).payload).toEqual({ currentPlayer: 'p1', lap: 0, totalLaps: 2 })
+    expect(dispatched.at(-1).payload).toEqual({ submitted: 0, required: 4 })
     conn.stop()
   })
 
@@ -357,42 +395,34 @@ describe('createRoomConnection', () => {
     ws.open()
     ws.message(snapshotEnvelope(1))
     const before = dispatched.length
-    ws.message({ type: T.TurnChanged, seq: 1, payload: { currentPlayer: 'dup' } }) // == lastApplied
+    ws.message({ type: T.PhaseChanged, seq: 1, payload: { phase: 'dup' } }) // == lastApplied
     expect(dispatched.length).toBe(before) // never reached the reducer
     conn.stop()
   })
 
-  // --- Lifecycle broadcasts outside applyEvents (room.go: processJoin,
-  // processLeave, markConnected, markDisconnected, evaluateVoting,
-  // maybeMigrateHost, handleGraceExpired). These used to share one
-  // pre-bumped seq across several distinct broadcasts sent back to back —
-  // the same class of bug as the engine-event cascades above, just in a
-  // different set of call sites. Envelope seq values below mirror exactly
-  // what the fixed server now sends (see internal/room/sequencing_test.go's
-  // TestSequencingInvariant_NonResolvingVotingDisconnect and
-  // TestSequencingInvariant_HostMigrationOnGraceExpiry for the server-side
-  // half of this same regression coverage). ---
+  // --- Lifecycle broadcasts sent back to back with strictly increasing seq:
+  // every one must be applied, not collapsed as a duplicate. ---
 
-  it('applies both the presence change and the vote_update when a voter disconnects without resolving the vote', () => {
+  it('applies both a presence change and the following planning_status when a player disconnects', () => {
     const conn = setUp()
     const ws = FakeWebSocket.instances[0]
     ws.open()
     ws.message(snapshotEnvelope(1, {
-      phase: 'voting', players: [], hostId: 'host-1', votesCast: 0, votesTotal: 4,
+      phase: 'planning', players: [{ id: 'p4', connected: true }], hostId: 'host-1', ordersSubmitted: 0, requiredCount: 4,
     }))
 
     ws.message({ type: T.PlayerPresenceChanged, seq: 2, payload: { id: 'p4', connected: false } })
-    ws.message({ type: T.VoteUpdate, seq: 3, payload: { votesCast: 0, votesTotal: 3 } })
+    ws.message({ type: T.PlanningStatus, seq: 3, payload: { submitted: 0, locked: 0, required: 3 } })
 
     const presence = dispatched.find((a) => a.type === T.PlayerPresenceChanged)
-    const voteUpdate = dispatched.find((a) => a.type === T.VoteUpdate)
+    const planning = dispatched.find((a) => a.type === T.PlanningStatus)
     expect(presence).toBeTruthy()
-    expect(voteUpdate).toBeTruthy() // was silently dropped as a duplicate of presence.seq before the fix
-    expect(voteUpdate.payload).toEqual({ votesCast: 0, votesTotal: 3 })
+    expect(planning).toBeTruthy() // would be silently dropped as a duplicate seq before the server fix
+    expect(planning.payload).toEqual({ submitted: 0, locked: 0, required: 3 })
     conn.stop()
   })
 
-  it('applies player_left, host_changed, and lobby_update in order when the lobby host is replaced', () => {
+  it('applies player_exited, host_changed, and lobby_update in order when the lobby host is replaced', () => {
     const conn = setUp()
     const ws = FakeWebSocket.instances[0]
     ws.open()
@@ -400,16 +430,16 @@ describe('createRoomConnection', () => {
       phase: 'lobby', players: [{ id: 'host-1', connected: false }, { id: 'bob', connected: true }], hostId: 'host-1',
     }))
 
-    ws.message({ type: T.PlayerLeft, seq: 2, payload: { id: 'host-1' } })
+    ws.message({ type: T.PlayerExited, seq: 2, payload: { id: 'host-1' } })
     ws.message({ type: T.HostChanged, seq: 3, payload: { hostId: 'bob' } })
     ws.message({ type: T.LobbyUpdate, seq: 4, payload: { players: [{ id: 'bob', connected: true }], hostId: 'bob' } })
 
-    const playerLeft = dispatched.find((a) => a.type === T.PlayerLeft)
+    const playerExited = dispatched.find((a) => a.type === T.PlayerExited)
     const hostChanged = dispatched.find((a) => a.type === T.HostChanged)
     const lobbyUpdate = dispatched.find((a) => a.type === T.LobbyUpdate)
-    expect(playerLeft).toBeTruthy()
-    expect(hostChanged).toBeTruthy() // was silently dropped as a duplicate of player_left.seq before the fix
-    expect(lobbyUpdate).toBeTruthy() // was silently dropped as a duplicate of host_changed.seq before the fix
+    expect(playerExited).toBeTruthy()
+    expect(hostChanged).toBeTruthy() // was silently dropped as a duplicate seq before the fix
+    expect(lobbyUpdate).toBeTruthy() // was silently dropped as a duplicate seq before the fix
     expect(hostChanged.payload).toEqual({ hostId: 'bob' })
     expect(lobbyUpdate.payload.hostId).toBe('bob')
     conn.stop()
