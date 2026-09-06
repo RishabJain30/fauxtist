@@ -3,62 +3,76 @@ package wsproto
 import "encoding/json"
 
 // ProtocolVersion is the current wire protocol version. Every envelope in
-// both directions carries it; the server rejects anything else at the
-// join frame with CloseUnsupportedVersion (see docs/protocol.md).
-const ProtocolVersion = 1
+// both directions carries it; the server rejects any other version at the
+// join frame with CloseUnsupportedVersion. Fauxlands' strategy protocol is
+// intentionally incompatible with the previous drawing-game protocol
+// (version 1), so an old client fails cleanly rather than half-working.
+const ProtocolVersion = 2
 
 // Close codes are WebSocket close codes in the private-use range
-// (4000-4999, RFC 6455 §7.4.2) for protocol-level rejections that happen
-// before or outside the existing structured-error-frame + 1008 path used
-// for join/reconnect business-rule failures (name_taken, room_full, etc).
+// (4000-4999, RFC 6455 §7.4.2) for protocol-level rejections outside the
+// structured-error-frame + 1008 path used for join business-rule failures.
 const (
 	CloseUnsupportedVersion = 4001
 	CloseInvalidEnvelope    = 4002
-	// CloseRoomClosed is sent when a room is torn down out from under a
-	// still-connected client: it expired from inactivity, or the process is
-	// shutting down. Distinct from a normal 1000 closure so the client's
-	// reconnect logic can recognize the room itself is gone rather than
-	// retrying against a socket that will never come back.
+	// CloseRoomClosed is sent when a room is torn down under a still-
+	// connected client (idle expiry or process shutdown), distinct from a
+	// normal 1000 so the client's reconnect logic knows the room is gone.
 	CloseRoomClosed = 4003
 )
 
-// Message type constants. Client->server and server->client share one namespace.
+// Message type constants. Client->server and server->client share one
+// namespace.
 const (
-	// Client -> server
-	TypeJoin          = "join"
-	TypeStartGame     = "start_game"
-	TypeStroke        = "stroke"
-	TypeChatMessage   = "chat_message"
-	TypeCastVote      = "cast_vote"
-	TypeImpostorGuess = "impostor_guess"
-	TypeEndDiscussion = "end_discussion"
-	TypeVoiceJoin     = "voice_join"
-	TypeVoiceLeave    = "voice_leave"
-	TypeVoiceSignal   = "voice_signal"
-	TypeVoiceState    = "voice_state"
-	TypeNewGame       = "new_game"
-	TypeResync        = "resync"
-	// TypeIceConfigRequest asks for the current best-effort WebRTC ICE
-	// configuration (STUN always, TURN if configured) — handled directly
-	// by the server's connection handler rather than the room actor, since
-	// it depends on no game state. See internal/server/turn.go.
+	// ---- Client -> server ----
+	TypeJoin             = "join"
+	TypeSetReady         = "set_ready"
+	TypeUpdateSettings   = "update_settings"
+	TypeStartMatch       = "start_match"
+	TypeSubmitDecl       = "submit_declaration"
+	TypeSetOrders        = "set_orders"
+	TypeLockOrders       = "lock_orders"
+	TypeUnlockOrders     = "unlock_orders"
+	TypeMapPing          = "map_ping"
+	TypeProposalArrow    = "proposal_arrow"
+	TypeChatMessage      = "chat_message"
+	TypeLeaveForNow      = "leave_for_now"
+	TypeResignMatch      = "resign_match"
+	TypeEndNoContest     = "end_no_contest"
+	TypeKeepWaiting      = "keep_waiting"
+	TypeRematchReady     = "rematch_ready"
+	TypeStartRematch     = "start_rematch"
+	TypeReturnToLobby    = "return_to_lobby"
+	TypeClaimSeat        = "claim_seat"
+	TypeRemovePlayer     = "remove_player" // host-only lobby moderation
+	TypeResync           = "resync"
+	TypeVoiceJoin        = "voice_join"
+	TypeVoiceLeave       = "voice_leave"
+	TypeVoiceSignal      = "voice_signal"
+	TypeVoiceState       = "voice_state"
 	TypeIceConfigRequest = "ice_config_request"
 
-	// Server -> client
+	// ---- Server -> client ----
 	TypeStateSnapshot         = "state_snapshot"
 	TypeJoinAccepted          = "join_accepted"
-	TypePlayerJoined          = "player_joined"
-	TypePlayerLeft            = "player_left"
-	TypePlayerPresenceChanged = "player_presence_changed"
-	TypeHostChanged           = "host_changed"
 	TypeLobbyUpdate           = "lobby_update"
-	TypeRoundStarted          = "round_started"
-	TypeStrokeBroadcast       = "stroke_broadcast"
-	TypeTurnChanged           = "turn_changed"
+	TypeSettingsChanged       = "settings_changed"
+	TypeMatchStarted          = "match_started"
 	TypePhaseChanged          = "phase_changed"
-	TypeVoteUpdate            = "vote_update"
-	TypeRoundResult           = "round_result"
+	TypeDeclarationStatus     = "declaration_status"
+	TypeDeclarationsRevealed  = "declarations_revealed"
+	TypeOrdersSaved           = "orders_saved"
+	TypePlanningStatus        = "planning_status"
+	TypeRoundResolved         = "round_resolved"
+	TypeRoundSummary          = "round_summary"
+	TypePlayerPresenceChanged = "player_presence_changed"
+	TypePlayerAFKChanged      = "player_afk_changed"
+	TypePlayerExited          = "player_exited"
+	TypeHostChanged           = "host_changed"
+	TypeSpectatorUpdate       = "spectator_update"
+	TypeRematchStatus         = "rematch_status"
 	TypeGameOver              = "game_over"
+	TypeLeaveAccepted         = "leave_accepted"
 	TypeChatBroadcast         = "chat_broadcast"
 	TypeError                 = "error"
 	TypeVoicePeers            = "voice_peers"
@@ -69,11 +83,8 @@ const (
 
 // Envelope is the outer wire frame for every message in both directions.
 // RoomID and Seq are stamped by the room on every outbound message (Seq is
-// the room's authoritative revision at send time — see Room.stamp);
-// RequestID is set by the client on outbound commands and echoed back on
-// any error produced by that specific command, for client-side
-// correlation. Fields unused in a given direction are omitted rather than
-// sent as zero values.
+// the room's authoritative revision at send time); RequestID is set by the
+// client on outbound commands and echoed on any error for that command.
 type Envelope struct {
 	Version   int             `json:"version"`
 	Type      string          `json:"type"`
@@ -85,7 +96,7 @@ type Envelope struct {
 
 // Encode builds an Envelope from a typed payload, stamped with the current
 // protocol version. RoomID/Seq (server->client) or RequestID (client->
-// server) are added afterward by the caller, once known.
+// server) are added afterward by the caller.
 func Encode(t string, payload any) (Envelope, error) {
 	b, err := json.Marshal(payload)
 	if err != nil {
@@ -96,79 +107,125 @@ func Encode(t string, payload any) (Envelope, error) {
 
 // ---- Client -> server payloads ----
 
-type Point struct {
-	X float64 `json:"x"`
-	Y float64 `json:"y"`
-}
-
-// JoinPayload is a client's join or reconnect attempt: a new join carries
-// Name/Emoji; a reconnect carries PlayerID/ReconnectToken instead.
+// JoinPayload is a client's join, reconnect, or spectate attempt: a new join
+// carries Name/Emoji; a reconnect carries PlayerID/ReconnectToken; AsSpectator
+// requests a read-only seat when the match has already started.
 type JoinPayload struct {
 	Name           string `json:"name,omitempty"`
 	Emoji          string `json:"emoji,omitempty"`
 	PlayerID       string `json:"playerId,omitempty"`
 	ReconnectToken string `json:"reconnectToken,omitempty"`
+	AsSpectator    bool   `json:"asSpectator,omitempty"`
 }
 
-type StrokePayload struct {
-	Points []Point `json:"points"`
-	Color  string  `json:"color"`
-	Width  float64 `json:"width"`
+// CommandWire is the wire form of one game command. The room converts it to a
+// game.Command after validating the type string.
+type CommandWire struct {
+	Type   string `json:"type"`
+	From   string `json:"from,omitempty"`
+	To     string `json:"to,omitempty"`
+	Armies int    `json:"armies,omitempty"`
+}
+
+type SetReadyPayload struct {
+	Ready bool `json:"ready"`
+}
+
+type UpdateSettingsPayload struct {
+	Preset string `json:"preset"`
+}
+
+type SubmitDeclPayload struct {
+	Command CommandWire `json:"command"`
+}
+
+type SetOrdersPayload struct {
+	Commands []CommandWire `json:"commands"`
+	Faux     bool          `json:"faux"`
 }
 
 type ChatPayload struct {
 	Text string `json:"text"`
 }
 
-type VotePayload struct {
-	Target string `json:"target"`
+type MapPingPayload struct {
+	Tile string `json:"tile"`
 }
 
-type ImpostorGuessPayload struct {
-	Guess string `json:"guess"`
+type ProposalArrowPayload struct {
+	From string `json:"from"`
+	To   string `json:"to"`
 }
 
-// ---- Server -> client payloads ----
-
-type PhaseChangedPayload struct {
-	Phase string `json:"phase"`
+type ClaimSeatPayload struct {
+	Name  string `json:"name"`
+	Emoji string `json:"emoji"`
 }
 
-type TurnChangedPayload struct {
-	CurrentPlayer string `json:"currentPlayer"`
-	Lap           int    `json:"lap"`
-	TotalLaps     int    `json:"totalLaps"`
+type RemovePlayerPayload struct {
+	PlayerID string `json:"playerId"`
 }
 
+// ---- Server -> client shared payloads ----
+
+// ErrorPayload is a typed, machine-readable error.
 type ErrorPayload struct {
 	Message string `json:"message"`
 	Code    string `json:"code,omitempty"`
 }
 
-// JoinAcceptedPayload hands a newly joined (non-reconnecting) player their
-// server-minted seat credentials. Sent privately, only to that player.
+// JoinAcceptedPayload hands a newly joined player (or seat-claiming
+// spectator) their server-minted seat credentials. Sent privately.
 type JoinAcceptedPayload struct {
 	PlayerID       string `json:"playerId"`
 	ReconnectToken string `json:"reconnectToken"`
+	Spectator      bool   `json:"spectator"`
 }
 
-// PlayerView is a player as seen by clients: the engine's authoritative
-// fields plus room-tracked connection presence, which the engine itself has
-// no notion of. Never carries a reconnect token, token hash, or connection
-// id — those never leave the room's own memory.
+// PlayerView is a player as seen by clients: engine-authoritative identity
+// plus room-tracked connection/readiness/AFK. Never carries a token, hash, or
+// connection id.
 type PlayerView struct {
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	Emoji            string `json:"emoji"`
+	Faction          string `json:"faction,omitempty"`
+	SpawnSlot        int    `json:"spawnSlot"`
+	Energy           int    `json:"energy"`
+	Influence        int    `json:"influence"`
+	FauxAvailable    bool   `json:"fauxAvailable"`
+	FauxUsedRound    int    `json:"fauxUsedRound"`
+	DominationStreak int    `json:"dominationStreak"`
+	Forfeited        bool   `json:"forfeited"`
+	Connected        bool   `json:"connected"`
+	Ready            bool   `json:"ready"`
+	AFK              bool   `json:"afk"`
+}
+
+// SpectatorView is a read-only watcher.
+type SpectatorView struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	Emoji     string `json:"emoji"`
-	Score     int    `json:"score"`
 	Connected bool   `json:"connected"`
 }
 
-// PlayerPresenceChangedPayload announces that one player's connection
-// status flipped, without implying they were removed from the roster.
+// PlayerPresenceChangedPayload announces a connection-status flip.
 type PlayerPresenceChangedPayload struct {
 	ID        string `json:"id"`
 	Connected bool   `json:"connected"`
+}
+
+// PlayerAFKChangedPayload announces an AFK-status flip.
+type PlayerAFKChangedPayload struct {
+	ID  string `json:"id"`
+	AFK bool   `json:"afk"`
+}
+
+// PlayerExitedPayload announces a permanent departure (resign or lobby leave).
+type PlayerExitedPayload struct {
+	ID        string `json:"id"`
+	Forfeited bool   `json:"forfeited"`
 }
 
 // HostChangedPayload announces deterministic host migration.
@@ -190,9 +247,6 @@ type VoiceStateIn struct {
 }
 
 // IceServer is one entry of an RTCPeerConnection's iceServers config.
-// Username/Credential are only set for a TURN entry with time-limited
-// REST credentials (see internal/server/turn.go); a STUN entry needs
-// neither.
 type IceServer struct {
 	URLs       []string `json:"urls"`
 	Username   string   `json:"username,omitempty"`

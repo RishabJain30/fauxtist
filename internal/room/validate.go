@@ -2,7 +2,6 @@ package room
 
 import (
 	"errors"
-	"math"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -37,16 +36,15 @@ func ValidatePlayerName(raw string) (string, error) {
 	return name, nil
 }
 
-// emojiPalette mirrors web/src/emoji.js's EMOJIS list exactly; the first
-// entry is the client's own default. Kept as the single source of truth
-// server-side so a forged join can never set an avatar outside the set the
-// UI actually offers.
+// emojiPalette mirrors web/src/emoji.js's EMOJIS list exactly; the first entry
+// is the client's default. Kept as the single source of truth server-side so a
+// forged join can never set an avatar outside the set the UI offers.
 var emojiPalette = []string{"🦊", "🐙", "🐸", "🦉", "🐨", "🦁", "🐵", "🦄", "🐼", "🐧", "🦔", "🐝"}
 
 var errEmojiUnsupported = errors.New("unsupported emoji")
 
-// validateEmoji accepts the empty string (mapped to the default emoji, for
-// a client that omits the field) or exactly one palette entry.
+// validateEmoji accepts the empty string (mapped to the default emoji) or
+// exactly one palette entry.
 func validateEmoji(raw string) (string, error) {
 	if raw == "" {
 		return emojiPalette[0], nil
@@ -59,57 +57,9 @@ func validateEmoji(raw string) (string, error) {
 	return "", errEmojiUnsupported
 }
 
-// Stroke bounds. Point coordinates are normalized to [0,1] by the canvas
-// model (see game.Point), but a fast drag can carry pointermove events
-// slightly outside the element's bounding box before pointerup fires, so a
-// margin is tolerated rather than rejecting an otherwise-legitimate
-// stroke. strokePalette lists every color the frontend can currently
-// produce (Canvas.jsx hardcodes "#111"); it exists to reject a forged
-// value, not to offer a color picker.
-const (
-	// maxStrokePoints comfortably covers even a long, fast continuous
-	// drag (pointermove fires well under 500 times for any single
-	// gesture in practice) while keeping a maximally-sized stroke's JSON
-	// encoding safely under wsproto.maxPayloadBytes.
-	maxStrokePoints = 500
-	minStrokeWidth  = 0.5
-	maxStrokeWidth  = 20
-	coordMargin     = 0.5
-)
-
-var strokePalette = map[string]bool{"#111": true}
-
-var (
-	errStrokeEmpty   = errors.New("stroke must have at least one point")
-	errStrokeTooLong = errors.New("stroke has too many points")
-	errStrokeCoord   = errors.New("stroke contains an invalid coordinate")
-	errStrokeWidth   = errors.New("stroke width out of range")
-	errStrokeColor   = errors.New("unsupported stroke color")
-)
-
-func validateStroke(p wsproto.StrokePayload) (wsproto.StrokePayload, error) {
-	if len(p.Points) == 0 {
-		return p, errStrokeEmpty
-	}
-	if len(p.Points) > maxStrokePoints {
-		return p, errStrokeTooLong
-	}
-	for _, pt := range p.Points {
-		if math.IsNaN(pt.X) || math.IsInf(pt.X, 0) || math.IsNaN(pt.Y) || math.IsInf(pt.Y, 0) {
-			return p, errStrokeCoord
-		}
-		if pt.X < -coordMargin || pt.X > 1+coordMargin || pt.Y < -coordMargin || pt.Y > 1+coordMargin {
-			return p, errStrokeCoord
-		}
-	}
-	if p.Width < minStrokeWidth || p.Width > maxStrokeWidth {
-		return p, errStrokeWidth
-	}
-	if !strokePalette[p.Color] {
-		return p, errStrokeColor
-	}
-	return p, nil
-}
+// ValidateEmoji is the exported form used by the room-creation HTTP handler,
+// which validates the host's chosen avatar before minting their seat.
+func ValidateEmoji(raw string) (string, error) { return validateEmoji(raw) }
 
 // maxChatRunes bounds one chat message.
 const maxChatRunes = 300
@@ -119,9 +69,8 @@ var (
 	errChatTooLong = errors.New("message is too long")
 )
 
-// validateChatText trims and bounds a chat message. React escapes it
-// normally on render (it's just text content, never innerHTML) — no HTML
-// sanitization happens or needs to happen here.
+// validateChatText trims and bounds a chat message. React escapes it on render
+// (it's text content, never innerHTML) — no HTML sanitization is needed here.
 func validateChatText(raw string) (string, error) {
 	text := strings.TrimSpace(raw)
 	if text == "" {
@@ -133,25 +82,9 @@ func validateChatText(raw string) (string, error) {
 	return text, nil
 }
 
-// maxGuessRunes bounds an impostor's word guess. Unlike chat, an empty
-// guess is left to the engine to score as simply wrong rather than
-// rejected outright — trimming and bounding length is all that's needed
-// here.
-const maxGuessRunes = 100
-
-var errGuessTooLong = errors.New("guess is too long")
-
-func validateGuess(raw string) (string, error) {
-	guess := strings.TrimSpace(raw)
-	if utf8.RuneCountInString(guess) > maxGuessRunes {
-		return "", errGuessTooLong
-	}
-	return guess, nil
-}
-
-// maxVoiceSignalPayloadBytes bounds one signaling message's SDP/ICE
-// payload — generous for a real offer/answer/candidate, still far short
-// of anything that could meaningfully burden the room actor relaying it.
+// maxVoiceSignalPayloadBytes bounds one signaling message's SDP/ICE payload —
+// generous for a real offer/answer/candidate, far short of anything that could
+// burden the room actor relaying it.
 const maxVoiceSignalPayloadBytes = 8 * 1024
 
 var (

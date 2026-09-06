@@ -1,706 +1,541 @@
 package game
 
-import (
-	"math/rand"
-	"strings"
-	"testing"
-)
+import "testing"
 
-// fakeWords returns a fixed sequence so tests are deterministic regardless of rng.
-type fakeWords struct {
-	pairs [][2]string // {category, word}
-	i     int
-}
+// These tests drive the Engine through its authoritative phase machine to
+// verify lifecycle, economy, Faux, lock/unlock, and rematch behaviour. They use
+// only the public engine API where possible; a few reach into the in-package
+// State to set a precondition (energy, Faux availability) that would otherwise
+// take a whole round to reach.
 
-func (f *fakeWords) Pick(_ map[string]bool) (string, string, bool) {
-	if f.i >= len(f.pairs) {
-		return "", "", false
-	}
-	p := f.pairs[f.i]
-	f.i++
-	return p[0], p[1], true
-}
+// ---- shared drivers (used by engine_test.go and orders_test.go) ----
 
-func testPlayers(n int) []Player {
-	ps := make([]Player, n)
-	for i := 0; i < n; i++ {
-		ps[i] = Player{ID: PlayerID(string(rune('a' + i))), Name: string(rune('A' + i))}
-	}
-	return ps
-}
+var extraIDs = []PlayerID{"p2", "p3", "p4", "p5", "p6"}
 
-func newTestEngine(t *testing.T, n int) *Engine {
-	t.Helper()
-	words := &fakeWords{pairs: [][2]string{
-		{"Animal", "Giraffe"}, {"Food", "Pizza"}, {"Animal", "Otter"},
-		{"Food", "Taco"}, {"Object", "Umbrella"}, {"Object", "Anchor"},
-	}}
-	return NewEngine(testPlayers(n), PlayerID("a"), n, rand.New(rand.NewSource(1)), words)
-}
-
-func TestNewEngineStartsInLobby(t *testing.T) {
-	e := newTestEngine(t, 4)
-	s := e.State()
-	if s.Phase != PhaseLobby {
-		t.Fatalf("phase = %q, want %q", s.Phase, PhaseLobby)
-	}
-	if len(s.Players) != 4 {
-		t.Fatalf("players = %d, want 4", len(s.Players))
-	}
-	if s.HostID != PlayerID("a") {
-		t.Fatalf("host = %q, want a", s.HostID)
-	}
-	if s.TotalRounds != 4 {
-		t.Fatalf("totalRounds = %d, want 4", s.TotalRounds)
-	}
-}
-
-func TestStartGameAssignsWordAndImpostor(t *testing.T) {
-	e := newTestEngine(t, 4)
-	events, err := e.StartGame(PlayerID("a"))
-	if err != nil {
-		t.Fatalf("StartGame error: %v", err)
-	}
-	s := e.State()
-	if s.Phase != PhaseDrawing {
-		t.Fatalf("phase = %q, want drawing", s.Phase)
-	}
-	if s.Round != 1 {
-		t.Fatalf("round = %d, want 1", s.Round)
-	}
-	if s.Word != "Giraffe" || s.Category != "Animal" {
-		t.Fatalf("got %q/%q, want Animal/Giraffe", s.Category, s.Word)
-	}
-	if e.playerIndex(s.ImpostorID) < 0 {
-		t.Fatalf("impostor %q is not a valid player", s.ImpostorID)
-	}
-	// Expect a RoundStarted and a TurnChanged event.
-	var sawRound, sawTurn bool
-	for _, ev := range events {
-		switch ev.(type) {
-		case RoundStarted:
-			sawRound = true
-		case TurnChanged:
-			sawTurn = true
-		}
-	}
-	if !sawRound || !sawTurn {
-		t.Fatalf("events missing: round=%v turn=%v", sawRound, sawTurn)
-	}
-}
-
-func TestStartGameRejectsNonHost(t *testing.T) {
-	e := newTestEngine(t, 4)
-	if _, err := e.StartGame(PlayerID("b")); err != ErrNotHost {
-		t.Fatalf("err = %v, want ErrNotHost", err)
-	}
-}
-
-func TestStartGameRejectsTooFewPlayers(t *testing.T) {
-	e := newTestEngine(t, 3)
-	if _, err := e.StartGame(PlayerID("a")); err != ErrTooFewPlayers {
-		t.Fatalf("err = %v, want ErrTooFewPlayers", err)
-	}
-}
-
+// startedEngine returns an engine with n players (host "h" plus n-1 others)
+// that has just started a match, so it sits in round-1 INCOME.
 func startedEngine(t *testing.T, n int) *Engine {
 	t.Helper()
-	e := newTestEngine(t, n)
-	if _, err := e.StartGame(PlayerID("a")); err != nil {
-		t.Fatalf("StartGame: %v", err)
+	e := NewEngine(Player{ID: "h", Name: "Host", Emoji: "🦊"}, 1)
+	for i := 0; i < n-1; i++ {
+		if err := e.UpsertPlayer(Player{ID: extraIDs[i], Name: string(extraIDs[i]), Emoji: "🐙"}); err != nil {
+			t.Fatalf("UpsertPlayer(%s): %v", extraIDs[i], err)
+		}
+	}
+	if err := e.StartMatch("h"); err != nil {
+		t.Fatalf("StartMatch: %v", err)
+	}
+	if e.Phase() != PhaseIncome {
+		t.Fatalf("after StartMatch phase = %q, want %q", e.Phase(), PhaseIncome)
 	}
 	return e
 }
 
-func currentDrawer(e *Engine) PlayerID {
-	return e.state.Players[e.state.TurnIndex].ID
-}
-
-func TestAddStrokeAdvancesTurn(t *testing.T) {
-	e := startedEngine(t, 4)
-	drawer := currentDrawer(e)
-	_, err := e.AddStroke(drawer, Stroke{By: drawer, Points: []Point{{X: 0.1, Y: 0.1}}})
-	if err != nil {
-		t.Fatalf("AddStroke: %v", err)
-	}
-	if e.state.TurnIndex != 1 {
-		t.Fatalf("turnIndex = %d, want 1", e.state.TurnIndex)
-	}
-	if len(e.State().Strokes) != 1 {
-		t.Fatalf("strokes = %d, want 1", len(e.State().Strokes))
-	}
-}
-
-func TestAddStrokeRejectsOutOfTurn(t *testing.T) {
-	e := startedEngine(t, 4)
-	notDrawer := e.state.Players[1].ID
-	if _, err := e.AddStroke(notDrawer, Stroke{By: notDrawer}); err != ErrNotYourTurn {
-		t.Fatalf("err = %v, want ErrNotYourTurn", err)
-	}
-}
-
-func TestDrawingEndsAfterAllLaps(t *testing.T) {
-	e := startedEngine(t, 4)
-	// 4 players * 2 laps = 8 strokes total.
-	for i := 0; i < 8; i++ {
-		d := currentDrawer(e)
-		if _, err := e.AddStroke(d, Stroke{By: d, Points: []Point{{X: 0.5, Y: 0.5}}}); err != nil {
-			t.Fatalf("stroke %d: %v", i, err)
-		}
-	}
-	if e.State().Phase != PhaseDiscussion {
-		t.Fatalf("phase = %q, want discussion", e.State().Phase)
-	}
-	if len(e.State().Strokes) != 8 {
-		t.Fatalf("strokes = %d, want 8", len(e.State().Strokes))
-	}
-}
-
-func discussionEngine(t *testing.T, n int) *Engine {
+// toDeclaration advances a round from INCOME to DECLARATION.
+func toDeclaration(t *testing.T, e *Engine) {
 	t.Helper()
-	e := startedEngine(t, n)
-	for i := 0; i < n*e.state.TotalLaps; i++ {
-		d := currentDrawer(e)
-		if _, err := e.AddStroke(d, Stroke{By: d}); err != nil {
-			t.Fatalf("stroke %d: %v", i, err)
-		}
+	if err := e.ApplyIncome(); err != nil {
+		t.Fatalf("ApplyIncome: %v", err)
 	}
-	return e
-}
-
-func TestEndDiscussionMovesToVoting(t *testing.T) {
-	e := discussionEngine(t, 4)
-	events, err := e.EndDiscussion(PlayerID("a"))
-	if err != nil {
-		t.Fatalf("EndDiscussion: %v", err)
-	}
-	if e.State().Phase != PhaseVoting {
-		t.Fatalf("phase = %q, want voting", e.State().Phase)
-	}
-	if len(events) != 1 {
-		t.Fatalf("events = %d, want 1", len(events))
+	if err := e.BeginDeclaration(); err != nil {
+		t.Fatalf("BeginDeclaration: %v", err)
 	}
 }
 
-func TestEndDiscussionWrongPhaseRejected(t *testing.T) {
-	e := startedEngine(t, 4) // still drawing
-	if _, err := e.EndDiscussion(PlayerID("a")); err != ErrWrongPhase {
-		t.Fatalf("err = %v, want ErrWrongPhase", err)
-	}
-}
-
-func votingEngine(t *testing.T, n int) *Engine {
+// toSecretPlanning advances a round from INCOME to SECRET_PLANNING, filling
+// declarations with auto-Holds.
+func toSecretPlanning(t *testing.T, e *Engine) {
 	t.Helper()
-	e := discussionEngine(t, n)
-	if _, err := e.EndDiscussion(PlayerID("a")); err != nil {
-		t.Fatalf("EndDiscussion: %v", err)
+	toDeclaration(t, e)
+	if err := e.RevealDeclarations(); err != nil {
+		t.Fatalf("RevealDeclarations: %v", err)
 	}
-	return e
-}
-
-func nonImpostors(e *Engine) []PlayerID {
-	var out []PlayerID
-	for _, p := range e.state.Players {
-		if p.ID != e.state.ImpostorID {
-			out = append(out, p.ID)
-		}
-	}
-	return out
-}
-
-func TestVotingCaughtGoesToReveal(t *testing.T) {
-	e := votingEngine(t, 4)
-	imp := e.State().ImpostorID
-	// Everyone (including impostor) votes for the impostor -> plurality -> caught.
-	for _, p := range e.state.Players {
-		if _, err := e.CastVote(p.ID, imp, nil); err != nil {
-			t.Fatalf("vote by %s: %v", p.ID, err)
-		}
-	}
-	if e.State().Phase != PhaseReveal {
-		t.Fatalf("phase = %q, want reveal", e.State().Phase)
-	}
-	if !e.State().LastResult.Caught {
-		t.Fatalf("expected Caught=true")
+	if err := e.BeginPlanning(); err != nil {
+		t.Fatalf("BeginPlanning: %v", err)
 	}
 }
 
-func TestVotingNotCaughtImpostorScores(t *testing.T) {
-	e := votingEngine(t, 4)
-	imp := e.State().ImpostorID
-	others := nonImpostors(e)
-	// Each non-impostor votes for a different non-impostor; impostor votes too.
-	// Result: impostor receives zero votes -> not caught.
-	_, _ = e.CastVote(others[0], others[1], nil)
-	_, _ = e.CastVote(others[1], others[2], nil)
-	_, _ = e.CastVote(others[2], others[0], nil)
-	_, err := e.CastVote(imp, others[0], nil)
-	if err != nil {
-		t.Fatalf("impostor vote: %v", err)
-	}
-	s := e.State()
-	if s.LastResult == nil {
-		t.Fatalf("expected a round result")
-	}
-	if s.LastResult.Caught {
-		t.Fatalf("expected Caught=false when impostor gets no votes")
-	}
-	var impScore int
-	for _, p := range s.Players {
-		if p.ID == imp {
-			impScore = p.Score
-		}
-	}
-	if impScore != 2 {
-		t.Fatalf("impostor score = %d, want 2", impScore)
-	}
-}
-
-func TestDoubleVoteRejected(t *testing.T) {
-	e := votingEngine(t, 4)
-	voter := e.state.Players[0].ID
-	target := e.state.Players[1].ID
-	if _, err := e.CastVote(voter, target, nil); err != nil {
-		t.Fatalf("first vote: %v", err)
-	}
-	if _, err := e.CastVote(voter, target, nil); err != ErrAlreadyVoted {
-		t.Fatalf("err = %v, want ErrAlreadyVoted", err)
-	}
-}
-
-func caughtEngine(t *testing.T, n int) *Engine {
+// finishRound resolves the current SECRET_PLANNING round and advances to the
+// next round's INCOME (or GAME_OVER).
+func finishRound(t *testing.T, e *Engine) {
 	t.Helper()
-	e := votingEngine(t, n)
-	imp := e.State().ImpostorID
-	for _, p := range e.state.Players {
-		if _, err := e.CastVote(p.ID, imp, nil); err != nil {
-			t.Fatalf("vote: %v", err)
-		}
+	if _, err := e.Resolve(); err != nil {
+		t.Fatalf("Resolve: %v", err)
 	}
-	return e
-}
-
-func TestImpostorGuessRightStealsWin(t *testing.T) {
-	e := caughtEngine(t, 4)
-	imp := e.State().ImpostorID
-	word := e.State().LastResult.Word
-	if _, err := e.ImpostorGuess(imp, strings.ToUpper(word)); err != nil {
-		t.Fatalf("guess: %v", err)
+	if err := e.BeginRoundSummary(); err != nil {
+		t.Fatalf("BeginRoundSummary: %v", err)
 	}
-	s := e.State()
-	var impScore int
-	for _, p := range s.Players {
-		if p.ID == imp {
-			impScore = p.Score
-		}
-	}
-	if impScore != 2 {
-		t.Fatalf("impostor score = %d, want 2", impScore)
+	if err := e.AdvanceRound(); err != nil {
+		t.Fatalf("AdvanceRound: %v", err)
 	}
 }
 
-func TestImpostorGuessWrongOthersScore(t *testing.T) {
-	e := caughtEngine(t, 4)
-	imp := e.State().ImpostorID
-	if _, err := e.ImpostorGuess(imp, "definitely-not-the-word"); err != nil {
-		t.Fatalf("guess: %v", err)
+// playIdleRound plays a whole round in which nobody submits anything.
+func playIdleRound(t *testing.T, e *Engine) {
+	t.Helper()
+	toSecretPlanning(t, e)
+	finishRound(t, e)
+}
+
+// driveToGameOver plays idle rounds until the match ends.
+func driveToGameOver(t *testing.T, e *Engine) {
+	t.Helper()
+	for guard := 0; e.Phase() == PhaseIncome; guard++ {
+		if guard > 20 {
+			t.Fatalf("match did not end after 20 rounds")
+		}
+		playIdleRound(t, e)
 	}
-	s := e.State()
-	for _, p := range s.Players {
-		if p.ID == imp {
-			if p.Score != 0 {
-				t.Fatalf("impostor score = %d, want 0", p.Score)
+	if e.Phase() != PhaseGameOver {
+		t.Fatalf("expected GAME_OVER, got %q", e.Phase())
+	}
+}
+
+func capitalOf(t *testing.T, s State, pid PlayerID) TileID {
+	t.Helper()
+	for _, tid := range s.SortedTileIDs() {
+		tile := s.Tiles[tid]
+		if tile.Type == TileCapital && tile.CapitalOwner == pid {
+			return tid
+		}
+	}
+	t.Fatalf("no capital for player %q", pid)
+	return ""
+}
+
+func nonCapitalOf(t *testing.T, s State, pid PlayerID) TileID {
+	t.Helper()
+	for _, tid := range s.SortedTileIDs() {
+		tile := s.Tiles[tid]
+		if tile.Owner == pid && tile.Type != TileCapital {
+			return tid
+		}
+	}
+	t.Fatalf("no owned non-capital tile for player %q", pid)
+	return ""
+}
+
+// ---- phase machine ----
+
+func TestEngine_StartMatchRequiresHost(t *testing.T) {
+	e := NewEngine(Player{ID: "h", Name: "Host", Emoji: "🦊"}, 1)
+	_ = e.UpsertPlayer(Player{ID: "p2"})
+	_ = e.UpsertPlayer(Player{ID: "p3"})
+	if err := e.StartMatch("p2"); err != ErrNotHost {
+		t.Fatalf("StartMatch by non-host = %v, want ErrNotHost", err)
+	}
+	if e.Phase() != PhaseLobby {
+		t.Fatalf("phase = %q, want lobby after rejected start", e.Phase())
+	}
+}
+
+func TestEngine_StartMatchTooFewPlayers(t *testing.T) {
+	e := NewEngine(Player{ID: "h", Name: "Host", Emoji: "🦊"}, 1)
+	_ = e.UpsertPlayer(Player{ID: "p2"})
+	if err := e.StartMatch("h"); err != ErrTooFewPlayers {
+		t.Fatalf("StartMatch with 2 players = %v, want ErrTooFewPlayers", err)
+	}
+}
+
+func TestEngine_WrongPhaseCalls(t *testing.T) {
+	e := NewEngine(Player{ID: "h", Name: "Host", Emoji: "🦊"}, 1)
+	_ = e.UpsertPlayer(Player{ID: "p2"})
+	_ = e.UpsertPlayer(Player{ID: "p3"})
+
+	// Before StartMatch (lobby) the round transitions are illegal.
+	if err := e.ApplyIncome(); err != ErrWrongPhase {
+		t.Fatalf("ApplyIncome in lobby = %v, want ErrWrongPhase", err)
+	}
+	if _, err := e.Resolve(); err != ErrWrongPhase {
+		t.Fatalf("Resolve in lobby = %v, want ErrWrongPhase", err)
+	}
+	if err := e.BeginDeclaration(); err != ErrWrongPhase {
+		t.Fatalf("BeginDeclaration in lobby = %v, want ErrWrongPhase", err)
+	}
+
+	// After StartMatch we are in INCOME; Resolve still needs SECRET_PLANNING.
+	if err := e.StartMatch("h"); err != nil {
+		t.Fatalf("StartMatch: %v", err)
+	}
+	if _, err := e.Resolve(); err != ErrWrongPhase {
+		t.Fatalf("Resolve in income = %v, want ErrWrongPhase", err)
+	}
+	if err := e.BeginPlanning(); err != ErrWrongPhase {
+		t.Fatalf("BeginPlanning in income = %v, want ErrWrongPhase", err)
+	}
+}
+
+// ---- starting state ----
+
+func TestEngine_StartingState(t *testing.T) {
+	for _, n := range []int{3, 4, 5, 6} {
+		n := n
+		t.Run(mapName(n), func(t *testing.T) {
+			e := startedEngine(t, n)
+			s := e.State()
+
+			if s.Round != 1 {
+				t.Fatalf("round = %d, want 1", s.Round)
 			}
-		} else {
-			if p.Score != 1 {
-				t.Fatalf("non-impostor %s score = %d, want 1", p.ID, p.Score)
+			if s.MapID == "" {
+				t.Fatalf("MapID not set")
 			}
+
+			slots := map[int]bool{}
+			factions := map[FactionID]bool{}
+			for _, p := range s.Players {
+				if p.Energy != StartingEnergy {
+					t.Fatalf("%s energy = %d, want %d", p.ID, p.Energy, StartingEnergy)
+				}
+				if p.Influence != 0 {
+					t.Fatalf("%s influence = %d, want 0", p.ID, p.Influence)
+				}
+				if !p.FauxAvailable {
+					t.Fatalf("%s FauxAvailable = false, want true", p.ID)
+				}
+				if p.DominationStreak != 0 {
+					t.Fatalf("%s DominationStreak = %d, want 0", p.ID, p.DominationStreak)
+				}
+				if slots[p.SpawnSlot] {
+					t.Fatalf("duplicate spawn slot %d", p.SpawnSlot)
+				}
+				slots[p.SpawnSlot] = true
+				if p.Faction != FactionOrder[p.SpawnSlot] {
+					t.Fatalf("%s faction = %q, want %q for slot %d", p.ID, p.Faction, FactionOrder[p.SpawnSlot], p.SpawnSlot)
+				}
+				if factions[p.Faction] {
+					t.Fatalf("duplicate faction %q", p.Faction)
+				}
+				factions[p.Faction] = true
+
+				// Exactly one owned capital (3 armies) + one adjacent owned
+				// non-capital territory (2 armies).
+				var capID, terrID TileID
+				capCount, terrCount := 0, 0
+				for _, tid := range s.SortedTileIDs() {
+					tile := s.Tiles[tid]
+					if tile.Owner != p.ID {
+						continue
+					}
+					if tile.Type == TileCapital {
+						capCount++
+						capID = tid
+					} else {
+						terrCount++
+						terrID = tid
+					}
+				}
+				if capCount != 1 {
+					t.Fatalf("%s owns %d capitals, want 1", p.ID, capCount)
+				}
+				if terrCount != 1 {
+					t.Fatalf("%s owns %d non-capital territories, want 1", p.ID, terrCount)
+				}
+				if s.Tiles[capID].Armies != StartingCapitalArmies {
+					t.Fatalf("%s capital armies = %d, want %d", p.ID, s.Tiles[capID].Armies, StartingCapitalArmies)
+				}
+				if s.Tiles[terrID].Type != TileNormal {
+					t.Fatalf("%s territory type = %q, want normal", p.ID, s.Tiles[terrID].Type)
+				}
+				if s.Tiles[terrID].Armies != StartingAdjacentArmies {
+					t.Fatalf("%s territory armies = %d, want %d", p.ID, s.Tiles[terrID].Armies, StartingAdjacentArmies)
+				}
+				if !hexAdjacent(s.Tiles[capID].Coord, s.Tiles[terrID].Coord) {
+					t.Fatalf("%s territory not adjacent to capital", p.ID)
+				}
+			}
+
+			// Board-wide counts.
+			relics, mines := 0, 0
+			for _, tid := range s.SortedTileIDs() {
+				switch s.Tiles[tid].Type {
+				case TileRelic:
+					relics++
+				case TileMineSite:
+					mines++
+				}
+			}
+			if relics != RelicCount {
+				t.Fatalf("board relics = %d, want %d", relics, RelicCount)
+			}
+			if mines != n+1 {
+				t.Fatalf("board mine sites = %d, want %d", mines, n+1)
+			}
+		})
+	}
+}
+
+// ---- income ----
+
+func TestEngine_IncomeRoundOneGrantsNothing(t *testing.T) {
+	e := startedEngine(t, 3)
+	before := map[PlayerID]int{}
+	for _, p := range e.State().Players {
+		before[p.ID] = p.Energy
+	}
+	if err := e.ApplyIncome(); err != nil {
+		t.Fatalf("ApplyIncome: %v", err)
+	}
+	for _, p := range e.State().Players {
+		if p.Energy != before[p.ID] {
+			t.Fatalf("%s energy changed on round-1 income: %d -> %d", p.ID, before[p.ID], p.Energy)
 		}
 	}
 }
 
-func TestOnlyImpostorMayGuess(t *testing.T) {
-	e := caughtEngine(t, 4)
-	nonImp := nonImpostors(e)[0]
-	if _, err := e.ImpostorGuess(nonImp, "x"); err != ErrNotImpostor {
-		t.Fatalf("err = %v, want ErrNotImpostor", err)
+func TestEngine_IncomeFromRoundTwoWithMineAndCap(t *testing.T) {
+	e := startedEngine(t, 3)
+	playIdleRound(t, e) // round 1 -> round 2 INCOME
+	if e.Phase() != PhaseIncome || e.State().Round != 2 {
+		t.Fatalf("expected round-2 INCOME, got phase %q round %d", e.Phase(), e.State().Round)
 	}
-}
 
-func TestUpsertPlayerAddsDuringLobby(t *testing.T) {
-	e := newTestEngine(t, 4)
-	if err := e.UpsertPlayer(Player{ID: "z", Name: "Zoe"}); err != nil {
-		t.Fatalf("UpsertPlayer: %v", err)
-	}
-	if len(e.State().Players) != 5 {
-		t.Fatalf("players = %d, want 5", len(e.State().Players))
-	}
-}
+	// Reach into the state to set up three distinct income scenarios.
+	hMine := nonCapitalOf(t, e.State(), "h")
+	e.state.Tiles[hMine].Structure = StructureMine
+	e.state.player("h").Energy = 0   // base(3) + 1 mine = 4
+	e.state.player("p2").Energy = 11 // 11 + 3 = 14, capped to 12
+	e.state.player("p3").Energy = 4  // 4 + 3 = 7
 
-func TestUpsertPlayerRenamesExisting(t *testing.T) {
-	e := newTestEngine(t, 4)
-	if err := e.UpsertPlayer(Player{ID: "a", Name: "Alice2"}); err != nil {
-		t.Fatalf("UpsertPlayer: %v", err)
-	}
-	if len(e.State().Players) != 4 {
-		t.Fatalf("players = %d, want 4 (rename, not add)", len(e.State().Players))
-	}
-	if e.State().Players[0].Name != "Alice2" {
-		t.Fatalf("name = %q, want Alice2", e.State().Players[0].Name)
-	}
-}
-
-func TestUpsertPlayerRejectsNewAfterStart(t *testing.T) {
-	e := startedEngine(t, 4)
-	if err := e.UpsertPlayer(Player{ID: "z", Name: "Zoe"}); err != ErrWrongPhase {
-		t.Fatalf("err = %v, want ErrWrongPhase", err)
-	}
-}
-
-func TestUpsertPlayerRejectsWhenFull(t *testing.T) {
-	e := newTestEngine(t, MaxPlayers)
-	if err := e.UpsertPlayer(Player{ID: "over", Name: "Over"}); err != ErrRoomFull {
-		t.Fatalf("err = %v, want ErrRoomFull", err)
-	}
-}
-
-func TestStartGameScalesRoundsToPlayers(t *testing.T) {
-	e := newTestEngine(t, 4)
-	_ = e.UpsertPlayer(Player{ID: "e", Name: "Eve"}) // now 5 players
-	if _, err := e.StartGame(PlayerID("a")); err != nil {
-		t.Fatalf("StartGame: %v", err)
-	}
-	if e.State().TotalRounds != 5 {
-		t.Fatalf("totalRounds = %d, want 5", e.State().TotalRounds)
-	}
-}
-
-func playToGameOver(t *testing.T, n int) *Engine {
-	t.Helper()
-	e := newTestEngine(t, n)
-	if _, err := e.StartGame(PlayerID("a")); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	for r := 0; r < n; r++ {
-		for i := 0; i < n*e.state.TotalLaps; i++ {
-			d := currentDrawer(e)
-			_, _ = e.AddStroke(d, Stroke{By: d})
-		}
-		_, _ = e.EndDiscussion(PlayerID("a"))
-		imp := e.State().ImpostorID
-		others := nonImpostors(e)
-		_, _ = e.CastVote(others[0], others[1], nil)
-		_, _ = e.CastVote(others[1], others[2], nil)
-		_, _ = e.CastVote(others[2], others[0], nil)
-		_, _ = e.CastVote(imp, others[0], nil)
-		e.AdvanceRound()
-	}
-	return e
-}
-
-func TestRestartStartsFreshGame(t *testing.T) {
-	e := playToGameOver(t, 4)
-	if e.State().Phase != PhaseGameOver {
-		t.Fatalf("precondition: phase = %q, want game_over", e.State().Phase)
-	}
-	if _, err := e.Restart(PlayerID("a")); err != nil {
-		t.Fatalf("Restart: %v", err)
+	if err := e.ApplyIncome(); err != nil {
+		t.Fatalf("ApplyIncome: %v", err)
 	}
 	s := e.State()
-	if s.Phase != PhaseDrawing {
-		t.Fatalf("phase = %q, want drawing", s.Phase)
+	if got := s.player("h").Energy; got != BaseIncome+MineEnergy {
+		t.Fatalf("h energy = %d, want %d (base + 1 mine)", got, BaseIncome+MineEnergy)
 	}
-	if s.Round != 1 {
-		t.Fatalf("round = %d, want 1", s.Round)
+	if got := s.player("p2").Energy; got != EnergyCap {
+		t.Fatalf("p2 energy = %d, want %d (capped)", got, EnergyCap)
 	}
+	if got := s.player("p3").Energy; got != 4+BaseIncome {
+		t.Fatalf("p3 energy = %d, want %d", got, 4+BaseIncome)
+	}
+}
+
+// ---- declarations / auto-hold ----
+
+func TestEngine_MissingDeclarationBecomesAutoHold(t *testing.T) {
+	e := startedEngine(t, 3)
+	toDeclaration(t, e)
+	// p2 submits nothing.
+	if err := e.RevealDeclarations(); err != nil {
+		t.Fatalf("RevealDeclarations: %v", err)
+	}
+	decl, ok := e.State().Declarations["p2"]
+	if !ok {
+		t.Fatalf("no auto-declaration filled for p2")
+	}
+	if decl.Submitted {
+		t.Fatalf("auto-Hold declaration should have Submitted=false")
+	}
+	if decl.Command.Type != CmdHold {
+		t.Fatalf("auto declaration = %q, want hold", decl.Command.Type)
+	}
+	if err := e.BeginPlanning(); err != nil {
+		t.Fatalf("BeginPlanning: %v", err)
+	}
+	if err := e.SetOrders("p2", nil, true); err != ErrFauxOnHold {
+		t.Fatalf("Faux on auto-Hold = %v, want ErrFauxOnHold", err)
+	}
+}
+
+// ---- faux ----
+
+func TestEngine_FauxDeclarationConsumesNoEnergy(t *testing.T) {
+	e := startedEngine(t, 3)
+	toDeclaration(t, e)
+	cap := capitalOf(t, e.State(), "p2")
+	if err := e.SubmitDeclaration("p2", Command{Type: CmdRecruit, To: cap}); err != nil {
+		t.Fatalf("SubmitDeclaration recruit: %v", err)
+	}
+	if err := e.RevealDeclarations(); err != nil {
+		t.Fatalf("RevealDeclarations: %v", err)
+	}
+	if err := e.BeginPlanning(); err != nil {
+		t.Fatalf("BeginPlanning: %v", err)
+	}
+	// Declare the (costly) recruit as Faux with no hidden real commands.
+	if err := e.SetOrders("p2", nil, true); err != nil {
+		t.Fatalf("SetOrders faux: %v", err)
+	}
+	if _, err := e.Resolve(); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	s := e.State()
+	p := s.player("p2")
+	if p.Energy != StartingEnergy {
+		t.Fatalf("faux recruit declaration changed energy: %d, want %d", p.Energy, StartingEnergy)
+	}
+	if p.FauxAvailable {
+		t.Fatalf("Faux should be spent, FauxAvailable still true")
+	}
+	if p.FauxUsedRound != 1 {
+		t.Fatalf("FauxUsedRound = %d, want 1", p.FauxUsedRound)
+	}
+}
+
+func TestEngine_FauxUnavailableAfterUse(t *testing.T) {
+	e := startedEngine(t, 3)
+
+	// Round 1: p2 spends Faux.
+	toDeclaration(t, e)
+	cap := capitalOf(t, e.State(), "p2")
+	if err := e.SubmitDeclaration("p2", Command{Type: CmdRecruit, To: cap}); err != nil {
+		t.Fatalf("round1 SubmitDeclaration: %v", err)
+	}
+	if err := e.RevealDeclarations(); err != nil {
+		t.Fatalf("round1 RevealDeclarations: %v", err)
+	}
+	if err := e.BeginPlanning(); err != nil {
+		t.Fatalf("round1 BeginPlanning: %v", err)
+	}
+	if err := e.SetOrders("p2", nil, true); err != nil {
+		t.Fatalf("round1 SetOrders faux: %v", err)
+	}
+	finishRound(t, e)
+
+	// Round 2: a second Faux attempt is rejected.
+	toDeclaration(t, e)
+	cap = capitalOf(t, e.State(), "p2")
+	if err := e.SubmitDeclaration("p2", Command{Type: CmdRecruit, To: cap}); err != nil {
+		t.Fatalf("round2 SubmitDeclaration: %v", err)
+	}
+	if err := e.RevealDeclarations(); err != nil {
+		t.Fatalf("round2 RevealDeclarations: %v", err)
+	}
+	if err := e.BeginPlanning(); err != nil {
+		t.Fatalf("round2 BeginPlanning: %v", err)
+	}
+	if err := e.SetOrders("p2", nil, true); err != ErrFauxUnavailable {
+		t.Fatalf("round2 SetOrders faux = %v, want ErrFauxUnavailable", err)
+	}
+}
+
+// ---- lock / unlock ----
+
+func TestEngine_LockUnlockOrders(t *testing.T) {
+	e := startedEngine(t, 3)
+	toSecretPlanning(t, e)
+
+	if err := e.LockOrders("p2"); err != nil {
+		t.Fatalf("LockOrders: %v", err)
+	}
+	if err := e.SetOrders("p2", nil, false); err != ErrAlreadyLocked {
+		t.Fatalf("SetOrders after lock = %v, want ErrAlreadyLocked", err)
+	}
+	if err := e.UnlockOrders("p2"); err != nil {
+		t.Fatalf("UnlockOrders: %v", err)
+	}
+	if err := e.SetOrders("p2", nil, false); err != nil {
+		t.Fatalf("SetOrders after unlock = %v, want nil", err)
+	}
+}
+
+// ---- full match / rematch ----
+
+func TestEngine_FullQuickMatchReachesGameOver(t *testing.T) {
+	e := NewEngine(Player{ID: "h", Name: "Host", Emoji: "🦊"}, 7)
+	_ = e.UpsertPlayer(Player{ID: "p2"})
+	_ = e.UpsertPlayer(Player{ID: "p3"})
+	if err := e.SetPreset("h", PresetQuick); err != nil {
+		t.Fatalf("SetPreset: %v", err)
+	}
+	if err := e.StartMatch("h"); err != nil {
+		t.Fatalf("StartMatch: %v", err)
+	}
+	if e.State().TotalRounds != PresetConfigFor(PresetQuick).Rounds {
+		t.Fatalf("TotalRounds = %d, want %d", e.State().TotalRounds, PresetConfigFor(PresetQuick).Rounds)
+	}
+
+	driveToGameOver(t, e)
+	if e.State().Result == nil {
+		t.Fatalf("Result is nil after game over")
+	}
+}
+
+func TestEngine_RematchResetsMatchState(t *testing.T) {
+	e := NewEngine(Player{ID: "h", Name: "Host", Emoji: "🦊"}, 7)
+	_ = e.UpsertPlayer(Player{ID: "p2"})
+	_ = e.UpsertPlayer(Player{ID: "p3"})
+	_ = e.SetPreset("h", PresetQuick)
+	_ = e.StartMatch("h")
+	driveToGameOver(t, e)
+
+	oldMap := e.State().MapID
+	if err := e.StartRematch("h", 99); err != nil {
+		t.Fatalf("StartRematch: %v", err)
+	}
+	s := e.State()
+	if s.Phase != PhaseIncome || s.Round != 1 {
+		t.Fatalf("after rematch phase=%q round=%d, want income/1", s.Phase, s.Round)
+	}
+	if s.Result != nil {
+		t.Fatalf("rematch did not clear Result")
+	}
+	if s.Resolution != nil {
+		t.Fatalf("rematch did not clear Resolution")
+	}
+	if len(s.Tiles) == 0 || s.MapID == "" {
+		t.Fatalf("rematch did not build a board")
+	}
+	_ = oldMap // seed differs; board content may or may not differ, only freshness is asserted
 	for _, p := range s.Players {
-		if p.Score != 0 {
-			t.Fatalf("score not reset: %s = %d", p.ID, p.Score)
+		if p.Energy != StartingEnergy || p.Influence != 0 || !p.FauxAvailable || p.DominationStreak != 0 {
+			t.Fatalf("%s not reset: energy=%d influence=%d faux=%v streak=%d",
+				p.ID, p.Energy, p.Influence, p.FauxAvailable, p.DominationStreak)
 		}
 	}
 }
 
-func TestRestartRejectsNonHostAndWrongPhase(t *testing.T) {
-	e := playToGameOver(t, 4)
-	if _, err := e.Restart(PlayerID("b")); err != ErrNotHost {
-		t.Fatalf("err = %v, want ErrNotHost", err)
+func TestEngine_ReturnToLobby(t *testing.T) {
+	e := NewEngine(Player{ID: "h", Name: "Host", Emoji: "🦊"}, 7)
+	_ = e.UpsertPlayer(Player{ID: "p2"})
+	_ = e.UpsertPlayer(Player{ID: "p3"})
+	_ = e.SetPreset("h", PresetQuick)
+	_ = e.StartMatch("h")
+	driveToGameOver(t, e)
+
+	if err := e.ReturnToLobby("h"); err != nil {
+		t.Fatalf("ReturnToLobby: %v", err)
 	}
-	e2 := startedEngine(t, 4) // still drawing
-	if _, err := e2.Restart(PlayerID("a")); err != ErrWrongPhase {
-		t.Fatalf("err = %v, want ErrWrongPhase", err)
+	s := e.State()
+	if s.Phase != PhaseLobby {
+		t.Fatalf("phase = %q, want lobby", s.Phase)
+	}
+	if s.Round != 0 {
+		t.Fatalf("round = %d, want 0", s.Round)
+	}
+	if len(s.Tiles) != 0 || s.Result != nil {
+		t.Fatalf("lobby should have no board and no result")
+	}
+	if len(s.Players) != 3 {
+		t.Fatalf("roster = %d, want 3 preserved", len(s.Players))
 	}
 }
 
-func TestNotCaughtHoldsOnRevealUntilAdvance(t *testing.T) {
-	e := votingEngine(t, 4)
-	imp := e.State().ImpostorID
-	others := nonImpostors(e)
-	_, _ = e.CastVote(others[0], others[1], nil)
-	_, _ = e.CastVote(others[1], others[2], nil)
-	_, _ = e.CastVote(others[2], others[0], nil)
-	_, _ = e.CastVote(imp, others[0], nil) // not caught
+func TestEngine_RematchDropsForfeitedPlayers(t *testing.T) {
+	// 4 players so that dropping one forfeited player still leaves 3 for setup.
+	e := NewEngine(Player{ID: "h", Name: "Host", Emoji: "🦊"}, 7)
+	_ = e.UpsertPlayer(Player{ID: "p2"})
+	_ = e.UpsertPlayer(Player{ID: "p3"})
+	_ = e.UpsertPlayer(Player{ID: "p4"})
+	_ = e.SetPreset("h", PresetQuick)
+	_ = e.StartMatch("h")
 
-	if e.State().Phase != PhaseReveal {
-		t.Fatalf("phase = %q, want reveal (should hold, not auto-advance)", e.State().Phase)
+	if err := e.Resign("p4"); err != nil {
+		t.Fatalf("Resign: %v", err)
 	}
-	e.AdvanceRound()
-	if e.State().Phase != PhaseDrawing {
-		t.Fatalf("after AdvanceRound phase = %q, want drawing", e.State().Phase)
-	}
-	if e.State().Round != 2 {
-		t.Fatalf("round = %d, want 2", e.State().Round)
-	}
-}
+	driveToGameOver(t, e)
 
-func TestGameEndsAfterFinalRound(t *testing.T) {
-	// totalRounds defaults to len(players); play all rounds and expect game over.
-	e := newTestEngine(t, 4)
-	if _, err := e.StartGame(PlayerID("a")); err != nil {
-		t.Fatalf("start: %v", err)
+	if err := e.StartRematch("h", 123); err != nil {
+		t.Fatalf("StartRematch: %v", err)
 	}
-	for r := 0; r < 4; r++ {
-		// Drive one full round: draw all strokes, discuss, vote (not caught path).
-		for i := 0; i < 4*e.state.TotalLaps; i++ {
-			d := currentDrawer(e)
-			_, _ = e.AddStroke(d, Stroke{By: d})
+	for _, p := range e.State().Players {
+		if p.ID == "p4" {
+			t.Fatalf("forfeited player p4 should have been dropped on rematch")
 		}
-		_, _ = e.EndDiscussion(PlayerID("a"))
-		imp := e.State().ImpostorID
-		others := nonImpostors(e)
-		// Split votes so the impostor receives none -> not caught.
-		_, _ = e.CastVote(others[0], others[1], nil)
-		_, _ = e.CastVote(others[1], others[2], nil)
-		_, _ = e.CastVote(others[2], others[0], nil)
-		_, _ = e.CastVote(imp, others[0], nil)
-		// Round holds on reveal; advance to the next round (or game over).
-		e.AdvanceRound()
-	}
-	if e.State().Phase != PhaseGameOver {
-		t.Fatalf("phase = %q, want game_over", e.State().Phase)
-	}
-}
-
-func TestRemovePlayerOnlyAllowedInLobby(t *testing.T) {
-	e := newTestEngine(t, 4)
-	if err := e.RemovePlayer(PlayerID("b")); err != nil {
-		t.Fatalf("RemovePlayer in lobby: %v", err)
 	}
 	if len(e.State().Players) != 3 {
-		t.Fatalf("players = %d, want 3", len(e.State().Players))
-	}
-
-	e2 := startedEngine(t, 4) // now drawing
-	if err := e2.RemovePlayer(PlayerID("b")); err != ErrNotInLobby {
-		t.Fatalf("err = %v, want ErrNotInLobby", err)
-	}
-	if len(e2.State().Players) != 4 {
-		t.Fatalf("players = %d, want 4 (unchanged)", len(e2.State().Players))
-	}
-}
-
-func TestRemovePlayerRejectsUnknown(t *testing.T) {
-	e := newTestEngine(t, 4)
-	if err := e.RemovePlayer(PlayerID("nope")); err != ErrUnknownPlayer {
-		t.Fatalf("err = %v, want ErrUnknownPlayer", err)
-	}
-}
-
-func TestSetHostIDTransitionsOwnership(t *testing.T) {
-	e := newTestEngine(t, 4)
-	if err := e.SetHostID(PlayerID("b")); err != nil {
-		t.Fatalf("SetHostID: %v", err)
-	}
-	if e.State().HostID != PlayerID("b") {
-		t.Fatalf("hostID = %q, want b", e.State().HostID)
-	}
-}
-
-func TestSetHostIDRejectsUnknown(t *testing.T) {
-	e := newTestEngine(t, 4)
-	if err := e.SetHostID(PlayerID("nope")); err != ErrUnknownPlayer {
-		t.Fatalf("err = %v, want ErrUnknownPlayer", err)
-	}
-	if e.State().HostID != PlayerID("a") {
-		t.Fatalf("hostID changed to %q, want unchanged a", e.State().HostID)
-	}
-}
-
-func TestSkipTurnAdvancesWithoutStroke(t *testing.T) {
-	e := startedEngine(t, 4)
-	before := len(e.State().Strokes)
-	events, err := e.SkipTurn()
-	if err != nil {
-		t.Fatalf("SkipTurn: %v", err)
-	}
-	if len(e.State().Strokes) != before {
-		t.Fatalf("strokes = %d, want unchanged %d (skip must not draw)", len(e.State().Strokes), before)
-	}
-	var sawTurnChanged bool
-	for _, ev := range events {
-		if _, ok := ev.(TurnChanged); ok {
-			sawTurnChanged = true
-		}
-	}
-	if !sawTurnChanged {
-		t.Fatal("expected a TurnChanged event, same as a normal stroke would produce")
-	}
-}
-
-func TestSkipTurnRejectsWrongPhase(t *testing.T) {
-	e := newTestEngine(t, 4) // still lobby
-	if _, err := e.SkipTurn(); err != ErrWrongPhase {
-		t.Fatalf("err = %v, want ErrWrongPhase", err)
-	}
-}
-
-func TestCastVoteIgnoresDisconnectedPlayers(t *testing.T) {
-	e := votingEngine(t, 4)
-	imp := e.State().ImpostorID
-	others := nonImpostors(e)
-	// Only 2 of 4 are connected; both are non-impostor "others". Once both
-	// have voted, voting must resolve without waiting for the other two.
-	connected := map[PlayerID]bool{others[0]: true, others[1]: true}
-	if _, err := e.CastVote(others[0], others[1], connected); err != nil {
-		t.Fatalf("vote 1: %v", err)
-	}
-	if e.State().Phase != PhaseVoting {
-		t.Fatalf("phase = %q, want voting (only 1/2 connected voters in)", e.State().Phase)
-	}
-	events, err := e.CastVote(others[1], others[0], connected)
-	if err != nil {
-		t.Fatalf("vote 2: %v", err)
-	}
-	if e.State().Phase != PhaseReveal {
-		t.Fatalf("phase = %q, want reveal once every connected voter has voted", e.State().Phase)
-	}
-	_ = imp
-	var sawResolved bool
-	for _, ev := range events {
-		if _, ok := ev.(PhaseChanged); ok {
-			sawResolved = true
-		}
-	}
-	if !sawResolved {
-		t.Fatal("expected voting to resolve and emit a PhaseChanged event")
-	}
-}
-
-func TestCheckVotingResolutionRecomputesOnPresenceChange(t *testing.T) {
-	e := votingEngine(t, 4)
-	others := nonImpostors(e)
-	imp := e.State().ImpostorID
-	connectedAll := map[PlayerID]bool{others[0]: true, others[1]: true, others[2]: true, imp: true}
-	if _, err := e.CastVote(others[0], others[1], connectedAll); err != nil {
-		t.Fatalf("vote: %v", err)
-	}
-	// 1/4 voted; not enough while everyone is connected.
-	if ev := e.CheckVotingResolution(connectedAll); ev != nil {
-		t.Fatalf("expected no resolution yet, got %v", ev)
-	}
-	// The three unvoted players disconnect; only the one who already voted
-	// remains connected — resolution must now trigger without a new vote.
-	connectedOne := map[PlayerID]bool{others[0]: true}
-	events := e.CheckVotingResolution(connectedOne)
-	if e.State().Phase != PhaseReveal {
-		t.Fatalf("phase = %q, want reveal", e.State().Phase)
-	}
-	if len(events) == 0 {
-		t.Fatal("expected resolution events")
-	}
-}
-
-func TestVotingWaitsWhenNoOneConnected(t *testing.T) {
-	e := votingEngine(t, 4)
-	others := nonImpostors(e)
-	imp := e.State().ImpostorID
-	connectedAll := map[PlayerID]bool{others[0]: true, others[1]: true, others[2]: true, imp: true}
-	if _, err := e.CastVote(others[0], others[1], connectedAll); err != nil {
-		t.Fatalf("vote: %v", err)
-	}
-	// Only 1/4 voted, so this alone would not resolve — but the check must
-	// also never resolve (or panic/loop) against a zero-connected set.
-	if ev := e.CheckVotingResolution(map[PlayerID]bool{}); ev != nil {
-		t.Fatalf("expected no resolution with zero connected voters, got %v", ev)
-	}
-	if e.State().Phase != PhaseVoting {
-		t.Fatalf("phase = %q, want voting (still waiting)", e.State().Phase)
-	}
-}
-
-func TestResolveImpostorTimeoutScoresLikeWrongGuess(t *testing.T) {
-	e := caughtEngine(t, 4)
-	imp := e.State().ImpostorID
-	events, err := e.ResolveImpostorTimeout()
-	if err != nil {
-		t.Fatalf("ResolveImpostorTimeout: %v", err)
-	}
-	s := e.State()
-	if !s.LastResult.ImpostorTimedOut {
-		t.Fatal("expected ImpostorTimedOut = true")
-	}
-	if s.LastResult.ImpostorGuessedRight {
-		t.Fatal("expected ImpostorGuessedRight = false")
-	}
-	for _, p := range s.Players {
-		want := 1
-		if p.ID == imp {
-			want = 0
-		}
-		if p.Score != want {
-			t.Fatalf("player %s score = %d, want %d", p.ID, p.Score, want)
-		}
-	}
-	var sawRoundEnded bool
-	for _, ev := range events {
-		if _, ok := ev.(RoundEnded); ok {
-			sawRoundEnded = true
-		}
-	}
-	if !sawRoundEnded {
-		t.Fatal("expected a RoundEnded event, same as a resolved guess would produce")
-	}
-}
-
-func TestGuessThenTimeoutOnlyResolvesOnce(t *testing.T) {
-	e := caughtEngine(t, 4)
-	imp := e.State().ImpostorID
-	word := e.State().LastResult.Word
-	if _, err := e.ImpostorGuess(imp, strings.ToUpper(word)); err != nil {
-		t.Fatalf("guess: %v", err)
-	}
-	// A timeout racing in after a real guess must not double-resolve.
-	if _, err := e.ResolveImpostorTimeout(); err != ErrWrongPhase {
-		t.Fatalf("err = %v, want ErrWrongPhase (already resolved by a real guess)", err)
-	}
-	imScore := 0
-	for _, p := range e.State().Players {
-		if p.ID == imp {
-			imScore = p.Score
-		}
-	}
-	if imScore != 2 {
-		t.Fatalf("impostor score = %d, want 2 (unchanged by the stale timeout)", imScore)
-	}
-}
-
-func TestTimeoutThenLateGuessOnlyResolvesOnce(t *testing.T) {
-	e := caughtEngine(t, 4)
-	imp := e.State().ImpostorID
-	if _, err := e.ResolveImpostorTimeout(); err != nil {
-		t.Fatalf("ResolveImpostorTimeout: %v", err)
-	}
-	// A real guess arriving late (e.g. network delay) after the timeout
-	// already resolved must not double-resolve or overwrite the result.
-	if _, err := e.ImpostorGuess(imp, "anything"); err != ErrWrongPhase {
-		t.Fatalf("err = %v, want ErrWrongPhase (already resolved by timeout)", err)
-	}
-	for _, p := range e.State().Players {
-		want := 1
-		if p.ID == imp {
-			want = 0
-		}
-		if p.Score != want {
-			t.Fatalf("player %s score = %d, want %d (unchanged by the late guess)", p.ID, p.Score, want)
-		}
+		t.Fatalf("roster = %d, want 3 after dropping forfeited", len(e.State().Players))
 	}
 }

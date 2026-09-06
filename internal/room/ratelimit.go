@@ -22,8 +22,8 @@ const abuseThreshold = 20
 // capped well before it can churn the room actor. Allow() never blocks
 // (see handle), so a saturated bucket costs nothing but a dropped message.
 type rateLimiters struct {
-	command *rate.Limiter // start_game, end_discussion, new_game, cast_vote, impostor_guess
-	stroke  *rate.Limiter
+	command *rate.Limiter // declarations, orders, lock/unlock, lobby/match/rematch actions
+	ping    *rate.Limiter // map pings and proposal arrows (frequent during negotiation)
 	chat    *rate.Limiter
 	voice   *rate.Limiter // voice_join/leave/signal/state
 	resync  *rate.Limiter
@@ -32,7 +32,7 @@ type rateLimiters struct {
 func newRateLimiters() *rateLimiters {
 	return &rateLimiters{
 		command: rate.NewLimiter(rate.Every(50*time.Millisecond), 40),
-		stroke:  rate.NewLimiter(rate.Every(50*time.Millisecond), 30),
+		ping:    rate.NewLimiter(rate.Every(100*time.Millisecond), 20),
 		chat:    rate.NewLimiter(rate.Every(500*time.Millisecond), 5),
 		voice:   rate.NewLimiter(rate.Every(50*time.Millisecond), 40),
 		resync:  rate.NewLimiter(rate.Every(2*time.Second), 5),
@@ -43,8 +43,8 @@ func newRateLimiters() *rateLimiters {
 // against the bucket its category maps to.
 func (c *Client) allow(msgType string) bool {
 	switch msgType {
-	case wsproto.TypeStroke:
-		return c.limiters.stroke.Allow()
+	case wsproto.TypeMapPing, wsproto.TypeProposalArrow:
+		return c.limiters.ping.Allow()
 	case wsproto.TypeChatMessage:
 		return c.limiters.chat.Allow()
 	case wsproto.TypeVoiceJoin, wsproto.TypeVoiceLeave, wsproto.TypeVoiceSignal, wsproto.TypeVoiceState:

@@ -141,7 +141,8 @@ func (s *Server) SetNotReady() { s.ready.Store(false) }
 func (s *Server) Handler() http.Handler { return securityHeaders(s.mux) }
 
 type createRoomReq struct {
-	Name string `json:"name"`
+	Name  string `json:"name"`
+	Emoji string `json:"emoji"`
 }
 
 // createRoomResp hands the host their seat credentials. ReconnectToken is
@@ -187,7 +188,12 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid_name", "invalid player name")
 		return
 	}
-	code, playerID, token, err := s.hub.CreateRoom(name)
+	emoji, err := room.ValidateEmoji(req.Emoji)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_emoji", "unsupported avatar")
+		return
+	}
+	code, playerID, token, err := s.hub.CreateRoom(name, emoji)
 	if err != nil {
 		if errors.Is(err, hub.ErrHubAtCapacity) {
 			s.logger.Warn("room creation rejected: hub at capacity")

@@ -12,6 +12,9 @@ coverage.*
 /internal/webui/dist/*
 !/internal/webui/dist/index.html
 
+# Working plans / scratch (never committed)
+/tasks/
+
 # Editor / OS
 .DS_Store
 .idea/

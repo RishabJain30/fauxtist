@@ -37,7 +37,7 @@ func TestSweepRemovesEmptyIdleRoom(t *testing.T) {
 	h := newTestHub(clock.Now, Config{EmptyRoomTTL: 5 * time.Minute, MaxRooms: 10})
 	defer h.Close()
 
-	code, _, _, err := h.CreateRoom("Host")
+	code, _, _, err := h.CreateRoom("Host", "🦊")
 	if err != nil {
 		t.Fatalf("CreateRoom: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestSweepNeverRemovesAnActivelyConnectedRoom(t *testing.T) {
 	h := newTestHub(clock.Now, Config{EmptyRoomTTL: time.Minute, MaxRooms: 10})
 	defer h.Close()
 
-	code, hostID, hostToken, err := h.CreateRoom("Host")
+	code, hostID, hostToken, err := h.CreateRoom("Host", "🦊")
 	if err != nil {
 		t.Fatalf("CreateRoom: %v", err)
 	}
@@ -86,13 +86,13 @@ func TestMaxRoomsCapacityEnforced(t *testing.T) {
 	h := New(WithConfig(Config{EmptyRoomTTL: time.Hour, SweepInterval: time.Hour, MaxRooms: 2}))
 	defer h.Close()
 
-	if _, _, _, err := h.CreateRoom("A"); err != nil {
+	if _, _, _, err := h.CreateRoom("A", "🦊"); err != nil {
 		t.Fatalf("CreateRoom 1: %v", err)
 	}
-	if _, _, _, err := h.CreateRoom("B"); err != nil {
+	if _, _, _, err := h.CreateRoom("B", "🦊"); err != nil {
 		t.Fatalf("CreateRoom 2: %v", err)
 	}
-	if _, _, _, err := h.CreateRoom("C"); err != ErrHubAtCapacity {
+	if _, _, _, err := h.CreateRoom("C", "🦊"); err != ErrHubAtCapacity {
 		t.Fatalf("CreateRoom 3 err = %v, want ErrHubAtCapacity", err)
 	}
 }
@@ -101,7 +101,7 @@ func TestMaxRoomsCapacityEnforced(t *testing.T) {
 
 func TestCloseStopsSweeperAndEveryRoomAndIsIdempotent(t *testing.T) {
 	h := New(WithConfig(Config{EmptyRoomTTL: time.Hour, SweepInterval: time.Hour, MaxRooms: 10}))
-	code, _, _, err := h.CreateRoom("Host")
+	code, _, _, err := h.CreateRoom("Host", "🦊")
 	if err != nil {
 		t.Fatalf("CreateRoom: %v", err)
 	}

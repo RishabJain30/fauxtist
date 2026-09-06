@@ -12,22 +12,22 @@ import (
 	"github.com/RishabJain30/fauxtist/internal/wsproto"
 )
 
-// JoinRequest is a client's parsed join or reconnect attempt. Exactly one of
-// the two shapes is populated: a new join carries Name/Emoji, a reconnect
-// carries PlayerID/Token.
+// JoinRequest is a client's parsed join, reconnect, or spectate attempt.
 type JoinRequest struct {
-	Reconnect bool
-	Name      string
-	Emoji     string
-	PlayerID  game.PlayerID
-	Token     string
+	Reconnect   bool
+	Name        string
+	Emoji       string
+	PlayerID    game.PlayerID
+	Token       string
+	AsSpectator bool
 }
 
-// JoinResult is returned to the server after a successful join or reconnect.
+// JoinResult is returned to the server after a successful join/reconnect.
 type JoinResult struct {
-	Client   *Client
-	PlayerID game.PlayerID
-	ConnID   uint64
+	Client    *Client
+	PlayerID  game.PlayerID
+	ConnID    uint64
+	Spectator bool
 }
 
 // seatCredential is the server-held proof of ownership for one seat. Only the
@@ -36,14 +36,21 @@ type seatCredential struct {
 	tokenHash identity.TokenHash
 }
 
-// Sentinel join/reconnect failures. Each maps to a stable protocol error
-// code via JoinErrorCode so the client can branch without parsing text.
+// spectatorInfo is a watcher's stable identity, kept so a reconnect and the
+// spectator list can render them without an engine row.
+type spectatorInfo struct {
+	name  string
+	emoji string
+}
+
+// Sentinel join/reconnect failures, each mapping to a stable protocol code.
 var (
 	ErrInvalidJoin      = errors.New("invalid join request")
 	ErrInvalidReconnect = errors.New("invalid or expired reconnect token")
 	ErrNameTaken        = errors.New("that name is already taken in this room")
 	ErrRoomFull         = errors.New("room is full")
-	ErrGameStarted      = errors.New("game already started")
+	ErrSpectatorsFull   = errors.New("this room has too many spectators")
+	ErrGameStarted      = errors.New("match already started")
 )
 
 // JoinErrorCode maps a join/reconnect failure to a stable protocol error code.
@@ -55,6 +62,8 @@ func JoinErrorCode(err error) string {
 		return "name_taken"
 	case errors.Is(err, ErrRoomFull):
 		return "room_full"
+	case errors.Is(err, ErrSpectatorsFull):
+		return "spectators_full"
 	case errors.Is(err, ErrGameStarted):
 		return "game_started"
 	case errors.Is(err, ErrRoomClosed):
@@ -64,7 +73,6 @@ func JoinErrorCode(err error) string {
 	}
 }
 
-// joinReq carries one join attempt into the Run loop.
 type joinReq struct {
 	conn *websocket.Conn
 	req  JoinRequest
@@ -76,17 +84,12 @@ type joinOutcome struct {
 	err    error
 }
 
-// ErrRoomClosed is returned by Join when the room's actor has already
-// stopped (expired from inactivity, or the process is shutting down) by
-// the time this call reaches it — a narrow window between Hub.Get
-// returning a room and this call reaching its now-dead actor. Callers
-// treat it the same as "room not found".
+// ErrRoomClosed is returned by Join when the room's actor has already stopped
+// by the time the call reaches it.
 var ErrRoomClosed = errors.New("room is closed")
 
-// Join hands a freshly accepted connection and its parsed join/reconnect
-// request to the room loop, and blocks until it has been resolved. Guards
-// against the room's actor having already stopped (see ErrRoomClosed)
-// instead of blocking forever on a request nothing will ever answer.
+// Join hands a freshly accepted connection and its parsed request to the room
+// loop and blocks until resolved.
 func (r *Room) Join(conn *websocket.Conn, req JoinRequest) (JoinResult, error) {
 	resp := make(chan joinOutcome, 1)
 	select {
@@ -102,116 +105,163 @@ func (r *Room) Join(conn *websocket.Conn, req JoinRequest) (JoinResult, error) {
 	}
 }
 
-// processJoin runs on the Run goroutine: it resolves identity, replaces any
-// prior connection for the same seat, and registers the new one.
+// processJoin runs on the Run goroutine: resolves identity, replaces any prior
+// connection for the same seat, registers the new one, and sends the initial
+// snapshot.
 func (r *Room) processJoin(j joinReq) {
-	player, isNew, token, err := r.resolveJoin(j.req)
-	if err != nil {
-		j.resp <- joinOutcome{err: err}
+	if j.req.Reconnect {
+		r.processReconnect(j)
 		return
 	}
-
-	connID := r.nextConnID
-	r.nextConnID++
-	c := newClient(player.ID, connID, player.Name, player.Emoji, j.conn)
-
-	if old, exists := r.clients[player.ID]; exists {
-		old.closeReplaced()
+	if j.req.AsSpectator || r.engine.Phase() != game.PhaseLobby {
+		r.processSpectatorJoin(j)
+		return
 	}
-	r.clients[player.ID] = c
-	slog.Info("player connected", "room", r.Code, "player", player.ID, "reconnect", j.req.Reconnect)
-	r.touch()
-	// No revision bump here: markConnected and the broadcastLobby below
-	// each bump their own via broadcastSequenced, exactly once per
-	// envelope actually sent — see broadcastSequenced's doc for why a
-	// batch pre-bump like this used to be would create a revision number
-	// no message is ever stamped with, which a real client's sequencer
-	// sees as a gap and resyncs over unnecessarily.
-	r.markConnected(player.ID)
-
-	if isNew {
-		r.sendJoinAccepted(c, token)
-	}
-	r.sendSnapshot(c)
-	r.broadcastLobby()
-
-	j.resp <- joinOutcome{result: JoinResult{Client: c, PlayerID: player.ID, ConnID: connID}}
+	r.processActiveJoin(j)
 }
 
-// resolveJoin validates a join/reconnect attempt against current room state
-// and, for a fresh join, mints new seat credentials. Must only run on the
-// Run goroutine.
-func (r *Room) resolveJoin(req JoinRequest) (player game.Player, isNew bool, token string, err error) {
-	if req.Reconnect {
-		p, e := r.resolveReconnect(req)
-		return p, false, "", e
-	}
-	return r.resolveNewJoin(req)
-}
-
-func (r *Room) resolveReconnect(req JoinRequest) (game.Player, error) {
-	if req.PlayerID == "" || req.Token == "" {
-		return game.Player{}, ErrInvalidReconnect
-	}
-	seat, ok := r.seats[req.PlayerID]
-	if !ok || !identity.Verify(req.Token, seat.tokenHash) {
-		return game.Player{}, ErrInvalidReconnect
-	}
-	for _, p := range r.engine.State().Players {
-		if p.ID == req.PlayerID {
-			return p, nil
-		}
-	}
-	// Seat credential exists but the player row is missing; should not
-	// happen, treat as invalid rather than fabricating a player.
-	return game.Player{}, ErrInvalidReconnect
-}
-
-func (r *Room) resolveNewJoin(req JoinRequest) (game.Player, bool, string, error) {
-	name, verr := ValidatePlayerName(req.Name)
+func (r *Room) processActiveJoin(j joinReq) {
+	name, verr := ValidatePlayerName(j.req.Name)
 	if verr != nil {
-		return game.Player{}, false, "", ErrInvalidJoin
+		j.resp <- joinOutcome{err: ErrInvalidJoin}
+		return
 	}
 	for _, p := range r.engine.State().Players {
 		if strings.EqualFold(strings.TrimSpace(p.Name), name) {
-			return game.Player{}, false, "", ErrNameTaken
+			j.resp <- joinOutcome{err: ErrNameTaken}
+			return
 		}
 	}
-
-	emoji, eerr := validateEmoji(req.Emoji)
+	emoji, eerr := validateEmoji(j.req.Emoji)
 	if eerr != nil {
-		return game.Player{}, false, "", ErrInvalidJoin
+		j.resp <- joinOutcome{err: ErrInvalidJoin}
+		return
 	}
-
 	playerID, perr := identity.NewPlayerID()
 	if perr != nil {
-		return game.Player{}, false, "", ErrInvalidJoin
+		j.resp <- joinOutcome{err: ErrInvalidJoin}
+		return
 	}
 	token, terr := identity.NewReconnectToken()
 	if terr != nil {
-		return game.Player{}, false, "", ErrInvalidJoin
+		j.resp <- joinOutcome{err: ErrInvalidJoin}
+		return
 	}
-
 	player := game.Player{ID: game.PlayerID(playerID), Name: name, Emoji: emoji}
 	if uerr := r.engine.UpsertPlayer(player); uerr != nil {
 		switch {
 		case errors.Is(uerr, game.ErrRoomFull):
-			return game.Player{}, false, "", ErrRoomFull
-		case errors.Is(uerr, game.ErrWrongPhase):
-			return game.Player{}, false, "", ErrGameStarted
+			j.resp <- joinOutcome{err: ErrRoomFull}
+		case errors.Is(uerr, game.ErrGameStarted):
+			j.resp <- joinOutcome{err: ErrGameStarted}
 		default:
-			return game.Player{}, false, "", ErrInvalidJoin
+			j.resp <- joinOutcome{err: ErrInvalidJoin}
 		}
+		return
 	}
-
 	r.seats[player.ID] = seatCredential{tokenHash: identity.Hash(token)}
-	return player, true, token, nil
+	r.ready[player.ID] = false
+
+	c := r.registerClient(player.ID, name, emoji, false, j.conn)
+	r.markConnected(player.ID)
+	r.sendJoinAccepted(c, token, false)
+	r.sendSnapshotTo(c)
+	r.broadcastLobby()
+	slog.Info("player joined", "room", r.Code, "player", player.ID)
+	j.resp <- joinOutcome{result: JoinResult{Client: c, PlayerID: player.ID, ConnID: c.ConnID}}
 }
 
-func (r *Room) sendJoinAccepted(c *Client, token string) {
+func (r *Room) processSpectatorJoin(j joinReq) {
+	if len(r.specSeats) >= game.MaxSpectators {
+		j.resp <- joinOutcome{err: ErrSpectatorsFull}
+		return
+	}
+	name, verr := ValidatePlayerName(j.req.Name)
+	if verr != nil {
+		name = "Spectator"
+	}
+	emoji, _ := validateEmoji(j.req.Emoji)
+	specID, perr := identity.NewPlayerID()
+	if perr != nil {
+		j.resp <- joinOutcome{err: ErrInvalidJoin}
+		return
+	}
+	token, terr := identity.NewReconnectToken()
+	if terr != nil {
+		j.resp <- joinOutcome{err: ErrInvalidJoin}
+		return
+	}
+	id := game.PlayerID(specID)
+	r.specSeats[id] = seatCredential{tokenHash: identity.Hash(token)}
+	r.specViews[id] = spectatorInfo{name: name, emoji: emoji}
+
+	c := r.registerClient(id, name, emoji, true, j.conn)
+	r.sendJoinAccepted(c, token, true)
+	r.sendSnapshotTo(c)
+	r.broadcastSpectatorUpdate()
+	slog.Info("spectator joined", "room", r.Code, "spectator", id)
+	j.resp <- joinOutcome{result: JoinResult{Client: c, PlayerID: id, ConnID: c.ConnID, Spectator: true}}
+}
+
+func (r *Room) processReconnect(j joinReq) {
+	if j.req.PlayerID == "" || j.req.Token == "" {
+		j.resp <- joinOutcome{err: ErrInvalidReconnect}
+		return
+	}
+	// Active seat?
+	if seat, ok := r.seats[j.req.PlayerID]; ok && identity.Verify(j.req.Token, seat.tokenHash) {
+		p := r.engine.State().PlayerByID(j.req.PlayerID)
+		if p == nil {
+			j.resp <- joinOutcome{err: ErrInvalidReconnect}
+			return
+		}
+		c := r.registerClient(j.req.PlayerID, p.Name, p.Emoji, false, j.conn)
+		r.markConnected(j.req.PlayerID)
+		r.sendSnapshotTo(c)
+		r.broadcastLobby()
+		slog.Info("player reconnected", "room", r.Code, "player", j.req.PlayerID)
+		j.resp <- joinOutcome{result: JoinResult{Client: c, PlayerID: j.req.PlayerID, ConnID: c.ConnID}}
+		return
+	}
+	// Spectator seat?
+	if seat, ok := r.specSeats[j.req.PlayerID]; ok && identity.Verify(j.req.Token, seat.tokenHash) {
+		info := r.specViews[j.req.PlayerID]
+		c := r.registerClient(j.req.PlayerID, info.name, info.emoji, true, j.conn)
+		r.sendSnapshotTo(c)
+		r.broadcastSpectatorUpdate()
+		j.resp <- joinOutcome{result: JoinResult{Client: c, PlayerID: j.req.PlayerID, ConnID: c.ConnID, Spectator: true}}
+		return
+	}
+	j.resp <- joinOutcome{err: ErrInvalidReconnect}
+}
+
+// registerClient mints a Client, replaces any prior live connection for the
+// seat, and records it in the right map.
+func (r *Room) registerClient(id game.PlayerID, name, emoji string, spectator bool, conn *websocket.Conn) *Client {
+	connID := r.nextConnID
+	r.nextConnID++
+	c := newClient(id, connID, name, emoji, conn)
+	c.Spectator = spectator
+	if spectator {
+		if old, ok := r.spectators[id]; ok {
+			old.closeReplaced()
+		}
+		r.spectators[id] = c
+	} else {
+		if old, ok := r.clients[id]; ok {
+			old.closeReplaced()
+		}
+		r.clients[id] = c
+	}
+	r.touch()
+	return c
+}
+
+func (r *Room) sendJoinAccepted(c *Client, token string, spectator bool) {
 	env, err := wsproto.Encode(wsproto.TypeJoinAccepted, wsproto.JoinAcceptedPayload{
 		PlayerID:       string(c.PlayerID),
 		ReconnectToken: token,
+		Spectator:      spectator,
 	})
 	if err == nil {
 		c.trySend(env)
@@ -224,13 +274,16 @@ type leaveReq struct {
 	connID   uint64
 }
 
-// processLeave runs on the Run goroutine. A disconnect only removes a client
-// if its connID still matches the currently registered connection for that
-// seat; a stale connection replaced by a reconnect must not evict the seat's
-// new, live connection. This never removes the player from the game roster
-// — that only ever happens via presence's reconnect-grace expiry (in the
-// lobby) or the phase-specific disconnect rules (in an active game).
+// processLeave removes a client if its connID still matches the seat's live
+// connection. Never removes a player from the engine roster — that only
+// happens via reconnect-grace expiry (lobby) or an explicit resign.
 func (r *Room) processLeave(lv leaveReq) {
+	if c, ok := r.spectators[lv.playerID]; ok && c.ConnID == lv.connID {
+		delete(r.spectators, lv.playerID)
+		r.touch()
+		r.broadcastSpectatorUpdate()
+		return
+	}
 	c, ok := r.clients[lv.playerID]
 	if !ok || c.ConnID != lv.connID {
 		return
@@ -238,9 +291,6 @@ func (r *Room) processLeave(lv leaveReq) {
 	delete(r.clients, lv.playerID)
 	r.touch()
 	slog.Info("player disconnected", "room", r.Code, "player", lv.playerID)
-	// No revision bump here — markDisconnected's own broadcastPresence
-	// (via broadcastSequenced) bumps for the presence flip; see the
-	// comment on that path in processJoin above.
 	if r.voicePresent[lv.playerID] {
 		delete(r.voicePresent, lv.playerID)
 		r.broadcastVoicePeerLeft(lv.playerID)

@@ -38,10 +38,9 @@ const maxReasonableSeconds = 24 * 60 * 60
 // server.DefaultHeartbeatConfig. Kept as one list, here, so a new duration
 // var only needs adding in one place to be covered by startup validation.
 var msVars = []string{
-	"FAUXTIST_REVEAL_MS",
 	"FAUXTIST_RECONNECT_GRACE_MS",
-	"FAUXTIST_DISCONNECTED_TURN_MS",
-	"FAUXTIST_IMPOSTOR_GUESS_MS",
+	"FAUXTIST_EARLY_COUNTDOWN_MS",
+	"FAUXTIST_SOLO_WAIT_MS",
 	"FAUXTIST_EMPTY_ROOM_TTL_MS",
 	"FAUXTIST_ROOM_SWEEP_INTERVAL_MS",
 	"FAUXTIST_HEARTBEAT_INTERVAL_MS",
@@ -58,6 +57,17 @@ var secondsVars = []string{
 // integer (not a duration).
 var intVars = []string{
 	"FAUXTIST_MAX_ROOMS",
+}
+
+// maxProxyHops bounds FAUXTIST_TRUSTED_PROXY_HOPS: nobody legitimately runs
+// this process behind more than a handful of trusted reverse proxies.
+const maxProxyHops = 10
+
+// nonNegIntVars lists every environment variable read as a plain non-negative
+// integer (zero is meaningful). FAUXTIST_TRUSTED_PROXY_HOPS defaults to 1 on
+// Render (one trusted edge) and 0 elsewhere (trust only the direct peer).
+var nonNegIntVars = []string{
+	"FAUXTIST_TRUSTED_PROXY_HOPS",
 }
 
 // Validate checks every timing-related environment variable the process
@@ -82,6 +92,11 @@ func Validate() error {
 	}
 	for _, key := range intVars {
 		if _, err := PositiveInt(key, 0); err != nil {
+			problems = append(problems, err.Error())
+		}
+	}
+	for _, key := range nonNegIntVars {
+		if _, err := NonNegativeInt(key, 0, maxProxyHops); err != nil {
 			problems = append(problems, err.Error())
 		}
 	}
@@ -141,6 +156,26 @@ func PositiveInt(key string, def int) (int, error) {
 	}
 	if n <= 0 {
 		return 0, fmt.Errorf("%s=%d must be positive", key, n)
+	}
+	return n, nil
+}
+
+// NonNegativeInt reads key as a plain non-negative integer (zero allowed),
+// bounded by max, or returns def if key is unset.
+func NonNegativeInt(key string, def, max int) (int, error) {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s=%q is not a valid integer", key, raw)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("%s=%d must not be negative", key, n)
+	}
+	if n > max {
+		return 0, fmt.Errorf("%s=%d exceeds the maximum reasonable value of %d", key, n, max)
 	}
 	return n, nil
 }

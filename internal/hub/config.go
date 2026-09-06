@@ -41,7 +41,10 @@ type Config struct {
 func DefaultConfig() Config {
 	emptyRoomTTL, _ := envconfig.PositiveDurationMS("FAUXTIST_EMPTY_ROOM_TTL_MS", 15*time.Minute)
 	sweepInterval, _ := envconfig.PositiveDurationMS("FAUXTIST_ROOM_SWEEP_INTERVAL_MS", 1*time.Minute)
-	maxRooms, _ := envconfig.PositiveInt("FAUXTIST_MAX_ROOMS", 500)
+	// A measured hobby-host default: one free Render instance holds a modest
+	// number of in-memory rooms comfortably. Raise via FAUXTIST_MAX_ROOMS
+	// only after load testing proves headroom.
+	maxRooms, _ := envconfig.PositiveInt("FAUXTIST_MAX_ROOMS", 100)
 	return Config{
 		EmptyRoomTTL:  emptyRoomTTL,
 		SweepInterval: sweepInterval,

@@ -79,8 +79,9 @@ func New(opts ...Option) *Hub {
 // CreateRoom registers a new room and mints the host's seat credentials. It
 // returns the join code, the host's playerId, and the host's raw reconnect
 // token — the only time that raw token is ever available outside the room's
-// own memory (where only its hash is kept).
-func (h *Hub) CreateRoom(hostName string) (code string, hostID game.PlayerID, hostToken string, err error) {
+// own memory (where only its hash is kept). hostEmoji is the caller-validated
+// avatar; it is carried onto the host's seat (an earlier version dropped it).
+func (h *Hub) CreateRoom(hostName, hostEmoji string) (code string, hostID game.PlayerID, hostToken string, err error) {
 	playerID, err := identity.NewPlayerID()
 	if err != nil {
 		return "", "", "", err
@@ -101,7 +102,7 @@ func (h *Hub) CreateRoom(hostName string) (code string, hostID game.PlayerID, ho
 	}
 	h.seq++
 	seed := time.Now().UnixNano() + h.seq
-	host := game.Player{ID: game.PlayerID(playerID), Name: hostName}
+	host := game.Player{ID: game.PlayerID(playerID), Name: hostName, Emoji: hostEmoji}
 	r := room.NewRoom(code, host, identity.Hash(token), seed, room.DefaultDurations(), room.WithClock(h.clock))
 	ctx, cancel := context.WithCancel(context.Background())
 	go r.Run(ctx)

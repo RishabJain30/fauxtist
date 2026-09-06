@@ -1,82 +1,50 @@
 package game
 
-import (
-	"math/rand"
-	"strings"
-)
+import "math/rand"
 
-// Engine holds and mutates game state. It is not safe for concurrent use;
-// the owning Room goroutine serializes all calls.
+// Engine owns and mutates the authoritative match State. It is pure and
+// networking-independent — it has no notion of a socket, a timer, or wall-
+// clock time — and is not safe for concurrent use: the owning Room goroutine
+// serializes every call. The room drives phase transitions (on server
+// deadlines), submits validated player commands, and reads copy-safe
+// snapshots via State; the engine enforces every rule.
 type Engine struct {
-	state         State
-	rng           *rand.Rand
-	words         WordSource
-	impostorOrder []int // player indices; round i uses impostorOrder[i-1]
+	state State
+	rng   *rand.Rand
 }
 
-// NewEngine creates a lobby-phase engine. totalRounds defaults to len(players)
-// so every player is impostor exactly once when totalRounds == len(players).
-func NewEngine(players []Player, host PlayerID, totalRounds int, rng *rand.Rand, words WordSource) *Engine {
+// NewEngine returns a lobby-phase engine seeded with its host. Seed drives
+// only spawn assignment and map orientation at match start; it is never
+// exposed as a client-controlled field.
+func NewEngine(host Player, seed int64) *Engine {
 	return &Engine{
+		rng: rand.New(rand.NewSource(seed)),
 		state: State{
 			Phase:       PhaseLobby,
-			Players:     append([]Player(nil), players...),
-			HostID:      host,
-			TotalRounds: totalRounds,
-			TotalLaps:   2,
-			UsedWords:   map[string]bool{},
+			Preset:      DefaultPreset,
+			TotalRounds: PresetConfigFor(DefaultPreset).Rounds,
+			Players:     []Player{host},
+			HostID:      host.ID,
 		},
-		rng:   rng,
-		words: words,
 	}
 }
 
-// State returns a copy-safe snapshot. Slices/maps are shallow-copied so callers
-// cannot mutate engine internals.
-func (e *Engine) State() State {
-	s := e.state
-	s.Players = append([]Player(nil), e.state.Players...)
-	s.Strokes = append([]Stroke(nil), e.state.Strokes...)
-	s.Votes = map[PlayerID]PlayerID{}
-	for k, v := range e.state.Votes {
-		s.Votes[k] = v
-	}
-	return s
-}
+// State returns a deep, copy-safe snapshot of the match state.
+func (e *Engine) State() State { return e.state.clone() }
 
-// playerIndex returns the index of id in Players, or -1.
-func (e *Engine) playerIndex(id PlayerID) int {
-	for i, p := range e.state.Players {
-		if p.ID == id {
-			return i
-		}
-	}
-	return -1
-}
+// Phase returns the current phase.
+func (e *Engine) Phase() Phase { return e.state.Phase }
 
-// StartGame moves from lobby to the first drawing round. Host-only.
-func (e *Engine) StartGame(by PlayerID) ([]Event, error) {
-	if e.state.Phase != PhaseLobby {
-		return nil, ErrWrongPhase
-	}
-	if by != e.state.HostID {
-		return nil, ErrNotHost
-	}
-	if len(e.state.Players) < MinPlayers {
-		return nil, ErrTooFewPlayers
-	}
-	// Precompute a shuffled impostor order so each player is impostor at most
-	// once before any repeats.
-	e.state.TotalRounds = len(e.state.Players)
-	e.impostorOrder = e.rng.Perm(len(e.state.Players))
-	return e.beginRound(1)
-}
+// Preset returns the current match preset.
+func (e *Engine) Preset() Preset { return e.state.Preset }
 
-// UpsertPlayer adds a new player during the lobby, or renames an existing one
-// (any phase, for reconnects). New players are rejected once the game has
-// started or the room is full.
+// ---- Lobby ----
+
+// UpsertPlayer adds a new player during the lobby, or updates the name/emoji
+// of an existing one in any phase (for reconnect metadata refreshes). A new
+// player is rejected once the match has started or the roster is full.
 func (e *Engine) UpsertPlayer(p Player) error {
-	if i := e.playerIndex(p.ID); i >= 0 {
+	if i := e.state.playerIndex(p.ID); i >= 0 {
 		if p.Name != "" {
 			e.state.Players[i].Name = p.Name
 		}
@@ -86,7 +54,7 @@ func (e *Engine) UpsertPlayer(p Player) error {
 		return nil
 	}
 	if e.state.Phase != PhaseLobby {
-		return ErrWrongPhase
+		return ErrGameStarted
 	}
 	if len(e.state.Players) >= MaxPlayers {
 		return ErrRoomFull
@@ -95,371 +63,517 @@ func (e *Engine) UpsertPlayer(p Player) error {
 	return nil
 }
 
-// RemovePlayer removes a player from the roster. Lobby-only: once a game has
-// started, removing a player would corrupt turn order, role assignment,
-// scoring, and round state, so a disconnected in-game player must instead be
-// handled by the room's phase-specific rules (skip their turn, exclude them
-// from the vote requirement, etc.) rather than removed here.
+// RemovePlayer removes a player from the roster. Lobby-only: an in-match seat
+// is handled by presence and resign rules, never removed outright.
 func (e *Engine) RemovePlayer(id PlayerID) error {
 	if e.state.Phase != PhaseLobby {
 		return ErrNotInLobby
 	}
-	idx := e.playerIndex(id)
-	if idx < 0 {
+	i := e.state.playerIndex(id)
+	if i < 0 {
 		return ErrUnknownPlayer
 	}
-	e.state.Players = append(e.state.Players[:idx], e.state.Players[idx+1:]...)
+	e.state.Players = append(e.state.Players[:i:i], e.state.Players[i+1:]...)
+	e.ensureHostValid()
 	return nil
 }
 
-// SetHostID transitions host ownership, e.g. for deterministic host
-// migration after the previous host's reconnect grace period expires.
-// Server-only: callers are trusted to have already decided this is
-// warranted (no permission check here, unlike the player-triggered actions
-// below).
+// SetHostID transitions host ownership (deterministic host migration). The
+// caller has already decided this is warranted; there is no permission check.
 func (e *Engine) SetHostID(id PlayerID) error {
-	if e.playerIndex(id) < 0 {
+	if e.state.playerIndex(id) < 0 {
 		return ErrUnknownPlayer
 	}
 	e.state.HostID = id
 	return nil
 }
 
-// SkipTurn advances the turn without recording a stroke. Server-only, for a
-// drawer who has been disconnected past the room's disconnected-turn grace
-// period; it reuses the exact same turn-advancement (and lap/phase
-// transition) logic as a normal AddStroke, so clients see identical
-// TurnChanged/PhaseChanged events either way.
-func (e *Engine) SkipTurn() ([]Event, error) {
-	if e.state.Phase != PhaseDrawing {
-		return nil, ErrWrongPhase
-	}
-	return e.advanceTurn(), nil
-}
-
-// beginRound sets up round n: picks a word, assigns the impostor, resets the
-// canvas and turn pointer, and returns the round-start events.
-func (e *Engine) beginRound(n int) ([]Event, error) {
-	cat, word, ok := e.words.Pick(e.state.UsedWords)
-	if !ok {
-		// Recover by resetting the used-word tracker once.
-		e.state.UsedWords = map[string]bool{}
-		cat, word, ok = e.words.Pick(e.state.UsedWords)
-		if !ok {
-			return nil, ErrNoWords
-		}
-	}
-	e.state.UsedWords[word] = true
-
-	impIdx := e.impostorOrder[(n-1)%len(e.impostorOrder)]
-	e.state.Round = n
-	e.state.Phase = PhaseDrawing
-	e.state.Category = cat
-	e.state.Word = word
-	e.state.ImpostorID = e.state.Players[impIdx].ID
-	e.state.TurnIndex = 0
-	e.state.Lap = 0
-	e.state.Strokes = nil
-	e.state.Votes = map[PlayerID]PlayerID{}
-	e.state.ImpostorGuess = ""
-	// LastResult intentionally NOT cleared here: it holds the most recently
-	// completed round's result so a client joining mid-next-round can still show
-	// it. finishVoting overwrites it when the current round completes.
-
-	order := make([]PlayerID, len(e.state.Players))
-	for i, p := range e.state.Players {
-		order[i] = p.ID
-	}
-	return []Event{
-		RoundStarted{Round: n, Category: cat, Word: word, ImpostorID: e.state.ImpostorID, Order: order},
-		TurnChanged{CurrentPlayer: e.state.Players[0].ID, Lap: 0, TotalLaps: e.state.TotalLaps},
-	}, nil
-}
-
-// AddStroke records the current drawer's stroke, advances the turn, and (when
-// all laps are done) transitions to the discussion phase.
-func (e *Engine) AddStroke(by PlayerID, s Stroke) ([]Event, error) {
-	if e.state.Phase != PhaseDrawing {
-		return nil, ErrWrongPhase
-	}
-	if by != e.state.Players[e.state.TurnIndex].ID {
-		return nil, ErrNotYourTurn
-	}
-	s.By = by
-	e.state.Strokes = append(e.state.Strokes, s)
-	events := []Event{StrokeAdded{Stroke: s}}
-	return append(events, e.advanceTurn()...), nil
-}
-
-// advanceTurn moves to the next drawer, wrapping laps, and returns the resulting
-// TurnChanged or (at the end of the final lap) the transition to discussion.
-func (e *Engine) advanceTurn() []Event {
-	e.state.TurnIndex++
-	if e.state.TurnIndex >= len(e.state.Players) {
-		e.state.TurnIndex = 0
-		e.state.Lap++
-		if e.state.Lap >= e.state.TotalLaps {
-			e.state.Phase = PhaseDiscussion
-			return []Event{PhaseChanged{Phase: PhaseDiscussion}}
-		}
-	}
-	return []Event{TurnChanged{
-		CurrentPlayer: e.state.Players[e.state.TurnIndex].ID,
-		Lap:           e.state.Lap,
-		TotalLaps:     e.state.TotalLaps,
-	}}
-}
-
-// EndDiscussion moves from discussion to voting. Triggered by the host or by the
-// room's discussion timer (the room passes the host ID in the timer case).
-func (e *Engine) EndDiscussion(by PlayerID) ([]Event, error) {
-	if e.state.Phase != PhaseDiscussion {
-		return nil, ErrWrongPhase
+// SetPreset chooses the match length/timing profile. Host-only, lobby-only.
+func (e *Engine) SetPreset(by PlayerID, p Preset) error {
+	if e.state.Phase != PhaseLobby {
+		return ErrWrongPhase
 	}
 	if by != e.state.HostID {
-		return nil, ErrNotHost
+		return ErrNotHost
 	}
-	e.state.Phase = PhaseVoting
-	return []Event{PhaseChanged{Phase: PhaseVoting}}, nil
+	if !ValidPreset(p) {
+		return ErrInvalidPreset
+	}
+	e.state.Preset = p
+	e.state.TotalRounds = PresetConfigFor(p).Rounds
+	return nil
 }
 
-// CastVote records a vote from a still-eligible voter, then resolves voting
-// if every currently eligible player has now voted. connected is the set of
-// currently connected player ids, supplied by the room — the engine has no
-// notion of presence, so a disconnected player's outstanding vote no longer
-// blocks resolution. Pass nil to treat every player as eligible (e.g. from
-// tests that don't care about presence).
-func (e *Engine) CastVote(voter, target PlayerID, connected map[PlayerID]bool) ([]Event, error) {
-	if e.state.Phase != PhaseVoting {
-		return nil, ErrWrongPhase
+// ensureHostValid points HostID at a real player if the current host is gone,
+// so the roster never references a missing host.
+func (e *Engine) ensureHostValid() {
+	if e.state.playerIndex(e.state.HostID) >= 0 {
+		return
 	}
-	if e.playerIndex(voter) < 0 || e.playerIndex(target) < 0 {
-		return nil, ErrUnknownPlayer
-	}
-	if _, done := e.state.Votes[voter]; done {
-		return nil, ErrAlreadyVoted
-	}
-	e.state.Votes[voter] = target
-	cast, total := e.votingProgress(connected)
-	events := []Event{VoteRecorded{Voter: voter, VotesCast: cast, VotesTotal: total}}
-	if !e.votingCanResolve(connected) {
-		return events, nil
-	}
-	return append(events, e.finishVoting()...), nil
-}
-
-// VotingProgress reports how many eligible (per connected) players have
-// voted so far, and how many are expected to. Exported so the room can
-// (re)broadcast an updated requirement when presence changes without
-// necessarily resolving voting.
-func (e *Engine) VotingProgress(connected map[PlayerID]bool) (cast, total int) {
-	return e.votingProgress(connected)
-}
-
-// CheckVotingResolution re-evaluates whether voting should resolve now,
-// given the currently connected set. Called by the room whenever a player's
-// presence changes during voting: a disconnect may complete the
-// requirement without any new vote being cast. A no-op outside the voting
-// phase or if the requirement isn't yet met.
-func (e *Engine) CheckVotingResolution(connected map[PlayerID]bool) []Event {
-	if e.state.Phase != PhaseVoting || !e.votingCanResolve(connected) {
-		return nil
-	}
-	return e.finishVoting()
-}
-
-// votingProgress reports how many votes have been cast in total (a vote
-// already cast remains counted even if that voter later disconnects — see
-// votingCanResolve) and how many players are currently required to vote: a
-// player counts toward the requirement if they're connected, OR if they've
-// already voted (so a since-disconnected voter's own past vote doesn't
-// shrink the requirement below what they already satisfied).
-func (e *Engine) votingProgress(connected map[PlayerID]bool) (cast, total int) {
-	cast = len(e.state.Votes)
-	for _, p := range e.state.Players {
-		_, voted := e.state.Votes[p.ID]
-		isConnected := connected == nil || connected[p.ID]
-		if voted || isConnected {
-			total++
-		}
-	}
-	return cast, total
-}
-
-// votingCanResolve reports whether every currently-required player has cast
-// a vote. Never resolves when nobody is connected at all, even if votes were
-// cast earlier — that waits for someone to reconnect instead of resolving
-// (or looping) on a stale requirement.
-func (e *Engine) votingCanResolve(connected map[PlayerID]bool) bool {
-	if connected != nil && len(connected) == 0 {
-		return false
-	}
-	cast, total := e.votingProgress(connected)
-	return total > 0 && cast >= total
-}
-
-// tally counts votes received per player.
-func (e *Engine) tally() map[PlayerID]int {
-	t := map[PlayerID]int{}
-	for _, target := range e.state.Votes {
-		t[target]++
-	}
-	return t
-}
-
-// caughtByPlurality reports whether the impostor has strictly the most votes.
-func (e *Engine) caughtByPlurality(t map[PlayerID]int) bool {
-	impVotes := t[e.state.ImpostorID]
-	if impVotes == 0 {
-		return false
-	}
-	for id, v := range t {
-		if id != e.state.ImpostorID && v >= impVotes {
-			return false
-		}
-	}
-	return true
-}
-
-// finishVoting evaluates the round once all votes are in.
-func (e *Engine) finishVoting() []Event {
-	t := e.tally()
-	caught := e.caughtByPlurality(t)
-	e.state.LastResult = &RoundResult{
-		ImpostorID: e.state.ImpostorID,
-		Word:       e.state.Word,
-		Caught:     caught,
-		Tally:      t,
-		ScoreDelta: map[PlayerID]int{},
-	}
-	e.state.Phase = PhaseReveal
-	if caught {
-		// Impostor gets a chance to steal the win by guessing the word; the
-		// round is not final yet, so no RoundEnded until the guess.
-		return []Event{PhaseChanged{Phase: PhaseReveal}}
-	}
-	// Impostor evaded detection: +2. Result is final; hold on the reveal phase
-	// until the room advances the round.
-	e.applyScore(e.state.ImpostorID, 2)
-	return append([]Event{PhaseChanged{Phase: PhaseReveal}}, e.finalizeRound()...)
-}
-
-// applyScore adds delta to a player's score and records it in the round result.
-func (e *Engine) applyScore(id PlayerID, delta int) {
-	for i := range e.state.Players {
-		if e.state.Players[i].ID == id {
-			e.state.Players[i].Score += delta
-		}
-	}
-	if e.state.LastResult != nil {
-		e.state.LastResult.ScoreDelta[id] += delta
-	}
-}
-
-// finalizeRound marks the round result final and holds on the reveal phase.
-// The room advances to the next round (or ends the game) via AdvanceRound after
-// a short reveal hold, so players can actually read the result.
-func (e *Engine) finalizeRound() []Event {
-	e.state.Phase = PhaseReveal
-	return []Event{RoundEnded{Result: *e.state.LastResult}}
-}
-
-// Restart begins a fresh game from the game-over screen: resets scores and word
-// history, keeps the same players, and starts round 1. Host-only.
-func (e *Engine) Restart(by PlayerID) ([]Event, error) {
-	if e.state.Phase != PhaseGameOver {
-		return nil, ErrWrongPhase
-	}
-	if by != e.state.HostID {
-		return nil, ErrNotHost
-	}
-	if len(e.state.Players) < MinPlayers {
-		return nil, ErrTooFewPlayers
-	}
-	for i := range e.state.Players {
-		e.state.Players[i].Score = 0
-	}
-	e.state.UsedWords = map[string]bool{}
-	e.state.LastResult = nil
-	e.state.TotalRounds = len(e.state.Players)
-	e.impostorOrder = e.rng.Perm(len(e.state.Players))
-	return e.beginRound(1)
-}
-
-// AdvanceRound leaves the reveal phase for the next round, or ends the game
-// after the final round. Called by the room once the reveal hold elapses.
-func (e *Engine) AdvanceRound() []Event {
-	if e.state.Phase != PhaseReveal {
-		return nil
-	}
-	if e.state.Round >= e.state.TotalRounds {
-		e.state.Phase = PhaseGameOver
-		return []Event{GameEnded{FinalScores: append([]Player(nil), e.state.Players...)}}
-	}
-	next, err := e.beginRound(e.state.Round + 1)
-	if err != nil {
-		// Should not happen with a healthy word source; end the game defensively.
-		e.state.Phase = PhaseGameOver
-		return []Event{GameEnded{FinalScores: append([]Player(nil), e.state.Players...)}}
-	}
-	return next
-}
-
-// ImpostorGuess resolves the reveal phase after the impostor was caught. A
-// correct guess steals the win (impostor +2); a wrong guess gives every
-// non-impostor +1. Either way the round then advances.
-func (e *Engine) ImpostorGuess(by PlayerID, guess string) ([]Event, error) {
-	if e.state.Phase != PhaseReveal {
-		return nil, ErrWrongPhase
-	}
-	if by != e.state.ImpostorID {
-		return nil, ErrNotImpostor
-	}
-	if e.guessAlreadyResolved() {
-		return nil, ErrWrongPhase
-	}
-	right := strings.EqualFold(strings.TrimSpace(guess), strings.TrimSpace(e.state.Word))
-	e.state.ImpostorGuess = guess
-	e.state.LastResult.ImpostorGuess = guess
-	e.state.LastResult.ImpostorGuessedRight = right
-	if right {
-		e.applyScore(e.state.ImpostorID, 2)
+	ids := e.state.SortedPlayerIDs()
+	if len(ids) > 0 {
+		e.state.HostID = ids[0]
 	} else {
-		for _, p := range e.state.Players {
-			if p.ID != e.state.ImpostorID {
-				e.applyScore(p.ID, 1)
+		e.state.HostID = ""
+	}
+}
+
+// ---- Match start / rematch ----
+
+// StartMatch begins a new match from the lobby. Host-only; requires 3–6
+// players.
+func (e *Engine) StartMatch(by PlayerID) error {
+	if e.state.Phase != PhaseLobby {
+		return ErrWrongPhase
+	}
+	if by != e.state.HostID {
+		return ErrNotHost
+	}
+	return e.setupMatch()
+}
+
+// StartRematch begins a fresh match from the Game Over / rematch lobby with a
+// new seed (new spawns and orientation). Host-only. Previously forfeited
+// players are dropped from the roster — they must rejoin as a fresh seat.
+func (e *Engine) StartRematch(by PlayerID, seed int64) error {
+	if e.state.Phase != PhaseGameOver {
+		return ErrWrongPhase
+	}
+	if by != e.state.HostID {
+		return ErrNotHost
+	}
+	e.dropForfeited()
+	e.ensureHostValid()
+	e.rng = rand.New(rand.NewSource(seed))
+	return e.setupMatch()
+}
+
+// ReturnToLobby resets the room to a normal lobby after a match, preserving
+// the roster (minus permanently-resigned players) and clearing all
+// match-private state. Host-only.
+func (e *Engine) ReturnToLobby(by PlayerID) error {
+	if e.state.Phase != PhaseGameOver {
+		return ErrWrongPhase
+	}
+	if by != e.state.HostID {
+		return ErrNotHost
+	}
+	e.dropForfeited()
+	e.ensureHostValid()
+	e.state.Phase = PhaseLobby
+	e.state.Round = 0
+	e.state.TotalRounds = PresetConfigFor(e.state.Preset).Rounds
+	e.state.Tiles = nil
+	e.state.MapID = ""
+	e.state.Declarations = nil
+	e.state.Orders = nil
+	e.state.Resolution = nil
+	e.state.Result = nil
+	e.state.Stats = nil
+	e.state.InfluenceHistory = nil
+	e.state.pendingGameOver = false
+	for i := range e.state.Players {
+		e.resetPlayerMatchFields(&e.state.Players[i])
+	}
+	return nil
+}
+
+// dropForfeited removes permanently-resigned players from the roster.
+func (e *Engine) dropForfeited() {
+	kept := make([]Player, 0, len(e.state.Players))
+	for _, p := range e.state.Players {
+		if !p.Forfeited {
+			kept = append(kept, p)
+		}
+	}
+	e.state.Players = kept
+}
+
+func (e *Engine) resetPlayerMatchFields(p *Player) {
+	p.Faction = ""
+	p.SpawnSlot = 0
+	p.Energy = 0
+	p.Influence = 0
+	p.FauxAvailable = false
+	p.FauxUsedRound = 0
+	p.DominationStreak = 0
+	p.Forfeited = false
+}
+
+// setupMatch builds the board and initial player state for a new match, then
+// enters the first round's INCOME phase. Uses the seeded RNG for spawn
+// assignment and a random dihedral orientation of the authored map.
+func (e *Engine) setupMatch() error {
+	n := len(e.state.Players)
+	if n < MinPlayers {
+		return ErrTooFewPlayers
+	}
+	if n > MaxPlayers {
+		return ErrTooManyPlayers
+	}
+	tmpl, ok := MapTemplateFor(n)
+	if !ok {
+		return ErrTooFewPlayers
+	}
+
+	// Random spawn assignment: player at index perm[i] takes slot i.
+	perm := e.rng.Perm(n)
+	rot := e.rng.Intn(6)
+	mir := e.rng.Intn(2)
+	transform := func(c Axial) Axial {
+		for k := 0; k < rot; k++ {
+			c = rot60(c)
+		}
+		if mir == 1 {
+			c = mirrorAxial(c)
+		}
+		return c
+	}
+
+	slotPlayer := make(map[int]PlayerID, n)
+	for i, pi := range perm {
+		slotPlayer[i] = e.state.Players[pi].ID
+		e.state.Players[pi].SpawnSlot = i
+		e.state.Players[pi].Faction = FactionOrder[i]
+	}
+
+	e.state.Tiles = map[TileID]*Tile{}
+	e.state.MapID = tmpl.ID
+	capitals := map[int]TileID{}
+	for _, td := range tmpl.Tiles {
+		t := &Tile{ID: td.ID, Coord: transform(td.Coord), Type: td.Type, Structure: StructureNone}
+		switch td.Type {
+		case TileCapital:
+			owner := slotPlayer[td.SpawnSlot]
+			t.Owner = owner
+			t.CapitalOwner = owner
+			t.Armies = StartingCapitalArmies
+			capitals[td.SpawnSlot] = td.ID
+		case TileRelic:
+			t.Armies = NeutralRelicGuardian
+		}
+		e.state.Tiles[t.ID] = t
+	}
+
+	// Seed each capital's adjacent starting territory: the nearest-to-centre
+	// free normal neighbour, deterministically.
+	for slot := 0; slot < n; slot++ {
+		capID := capitals[slot]
+		owner := slotPlayer[slot]
+		var chosen TileID
+		best := 1 << 30
+		for _, tid := range e.state.SortedTileIDs() {
+			t := e.state.Tiles[tid]
+			if t.Type != TileNormal || t.Owner != "" || !e.state.adjacent(capID, tid) {
+				continue
+			}
+			if d := HexDistance(Axial{}, t.Coord); d < best {
+				best = d
+				chosen = tid
+			}
+		}
+		if chosen != "" {
+			e.state.Tiles[chosen].Owner = owner
+			e.state.Tiles[chosen].Armies = StartingAdjacentArmies
+		}
+	}
+
+	e.state.Stats = map[PlayerID]*MatchStats{}
+	e.state.InfluenceHistory = map[PlayerID][]int{}
+	for i := range e.state.Players {
+		p := &e.state.Players[i]
+		p.Energy = StartingEnergy
+		p.Influence = 0
+		p.FauxAvailable = true
+		p.FauxUsedRound = 0
+		p.DominationStreak = 0
+		p.Forfeited = false
+		e.state.Stats[p.ID] = &MatchStats{}
+		e.state.InfluenceHistory[p.ID] = nil
+	}
+
+	e.state.TotalRounds = PresetConfigFor(e.state.Preset).Rounds
+	e.state.Round = 1
+	e.state.Declarations = map[PlayerID]Declaration{}
+	e.state.Orders = map[PlayerID]OrderSet{}
+	e.state.Resolution = nil
+	e.state.Result = nil
+	e.state.pendingGameOver = false
+	e.state.Phase = PhaseIncome
+	return nil
+}
+
+// ---- Phase transitions (driven by the room's phase timers) ----
+
+// ApplyIncome grants each active player their round income (from round two
+// onward: base plus one per completed Mine, capped) and advances to
+// NEGOTIATION. Income is applied exactly once per round.
+func (e *Engine) ApplyIncome() error {
+	if e.state.Phase != PhaseIncome {
+		return ErrWrongPhase
+	}
+	if e.state.Round >= 2 {
+		for i := range e.state.Players {
+			p := &e.state.Players[i]
+			if p.Forfeited {
+				continue
+			}
+			gain := BaseIncome + e.minesControlledBy(p.ID)
+			p.Energy += gain
+			if p.Energy > EnergyCap {
+				p.Energy = EnergyCap
 			}
 		}
 	}
-	return e.finalizeRound(), nil
+	e.state.Phase = PhaseNegotiation
+	return nil
 }
 
-// ResolveImpostorTimeout resolves the reveal phase when a caught impostor's
-// guess deadline expires without a guess: treated as an incorrect guess, so
-// every non-impostor gets the usual +1. Server-only — there is no guess text
-// to validate against, so this does not go through ImpostorGuess. A valid
-// guess arriving first (or a timeout that already fired) makes this a no-op
-// via the same guessAlreadyResolved check, so the two can never both apply.
-func (e *Engine) ResolveImpostorTimeout() ([]Event, error) {
-	if e.state.Phase != PhaseReveal || e.state.LastResult == nil || !e.state.LastResult.Caught {
-		return nil, ErrWrongPhase
-	}
-	if e.guessAlreadyResolved() {
-		return nil, ErrWrongPhase
-	}
-	for _, p := range e.state.Players {
-		if p.ID != e.state.ImpostorID {
-			e.applyScore(p.ID, 1)
+func (e *Engine) minesControlledBy(id PlayerID) int {
+	n := 0
+	for _, tid := range e.state.SortedTileIDs() {
+		t := e.state.Tiles[tid]
+		if t.Owner == id && t.Structure == StructureMine {
+			n++
 		}
 	}
-	e.state.LastResult.ImpostorTimedOut = true
-	e.state.LastResult.ImpostorGuessedRight = false
-	return e.finalizeRound(), nil
+	return n
 }
 
-// guessAlreadyResolved reports whether the caught impostor's guess has
-// already been settled, by a real guess or an earlier timeout — whichever
-// happens first must make the other a no-op.
-func (e *Engine) guessAlreadyResolved() bool {
-	return e.state.ImpostorGuess != "" || (e.state.LastResult != nil && e.state.LastResult.ImpostorTimedOut)
+// BeginDeclaration advances NEGOTIATION → DECLARATION.
+func (e *Engine) BeginDeclaration() error {
+	if e.state.Phase != PhaseNegotiation {
+		return ErrWrongPhase
+	}
+	e.state.Phase = PhaseDeclaration
+	return nil
+}
+
+// SubmitDeclaration records a player's public-later declaration. It must be a
+// legal, self-affordable command against the current board.
+func (e *Engine) SubmitDeclaration(by PlayerID, cmd Command) error {
+	if e.state.Phase != PhaseDeclaration {
+		return ErrWrongPhase
+	}
+	p := e.state.player(by)
+	if p == nil {
+		return ErrUnknownPlayer
+	}
+	if p.Forfeited {
+		return ErrForfeited
+	}
+	if err := e.state.validateSingleCommand(by, cmd); err != nil {
+		return err
+	}
+	if cmd.EnergyCost() > p.Energy {
+		return ErrNotEnoughEnergy
+	}
+	e.state.Declarations[by] = Declaration{Command: cmd, Submitted: true}
+	return nil
+}
+
+// RevealDeclarations advances DECLARATION → DECLARATION_REVEAL, filling any
+// missing declaration with an auto-Hold (which can never become Faux).
+func (e *Engine) RevealDeclarations() error {
+	if e.state.Phase != PhaseDeclaration {
+		return ErrWrongPhase
+	}
+	for _, pid := range e.state.SortedPlayerIDs() {
+		if e.state.player(pid).Forfeited {
+			continue
+		}
+		if _, ok := e.state.Declarations[pid]; !ok {
+			e.state.Declarations[pid] = Declaration{Command: HoldCommand(), Submitted: false}
+		}
+	}
+	e.state.Phase = PhaseDeclarationReveal
+	return nil
+}
+
+// BeginPlanning advances DECLARATION_REVEAL → SECRET_PLANNING.
+func (e *Engine) BeginPlanning() error {
+	if e.state.Phase != PhaseDeclarationReveal {
+		return ErrWrongPhase
+	}
+	e.state.Phase = PhaseSecretPlanning
+	return nil
+}
+
+// SetOrders atomically replaces a player's private planning draft: their
+// hidden real commands and whether their public declaration is Faux. The
+// whole set must be legal and affordable together.
+func (e *Engine) SetOrders(by PlayerID, commands []Command, faux bool) error {
+	if e.state.Phase != PhaseSecretPlanning {
+		return ErrWrongPhase
+	}
+	p := e.state.player(by)
+	if p == nil {
+		return ErrUnknownPlayer
+	}
+	if p.Forfeited {
+		return ErrForfeited
+	}
+	if o, ok := e.state.Orders[by]; ok && o.Locked {
+		return ErrAlreadyLocked
+	}
+	decl, hasDecl := e.state.Declarations[by]
+	if faux {
+		if !p.FauxAvailable {
+			return ErrFauxUnavailable
+		}
+		if !hasDecl || !decl.Submitted || decl.Command.Type == CmdHold {
+			return ErrFauxOnHold
+		}
+	}
+	if len(commands) > HiddenCommandCount(faux) {
+		return ErrTooManyCommands
+	}
+
+	real := make([]Command, 0, RealCommandSlots)
+	if !faux {
+		if hasDecl && decl.Submitted && decl.Command.Type != CmdHold {
+			real = append(real, decl.Command)
+		} else {
+			real = append(real, HoldCommand())
+		}
+	}
+	real = append(real, commands...)
+	if err := e.state.validateRealCommands(by, real); err != nil {
+		return err
+	}
+
+	e.state.Orders[by] = OrderSet{
+		Faux:      faux,
+		Commands:  append([]Command(nil), commands...),
+		Submitted: true,
+		Locked:    false,
+	}
+	return nil
+}
+
+// LockOrders marks a player's draft final for this round. Locking with no
+// submitted orders is allowed — missing slots become Hold at resolution.
+func (e *Engine) LockOrders(by PlayerID) error {
+	if e.state.Phase != PhaseSecretPlanning {
+		return ErrWrongPhase
+	}
+	p := e.state.player(by)
+	if p == nil {
+		return ErrUnknownPlayer
+	}
+	if p.Forfeited {
+		return ErrForfeited
+	}
+	o := e.state.Orders[by]
+	o.Locked = true
+	e.state.Orders[by] = o
+	return nil
+}
+
+// UnlockOrders reopens a player's draft for editing during the active
+// deadline. (The room refuses this once the all-locked countdown has begun.)
+func (e *Engine) UnlockOrders(by PlayerID) error {
+	if e.state.Phase != PhaseSecretPlanning {
+		return ErrWrongPhase
+	}
+	p := e.state.player(by)
+	if p == nil {
+		return ErrUnknownPlayer
+	}
+	o := e.state.Orders[by]
+	o.Locked = false
+	e.state.Orders[by] = o
+	return nil
+}
+
+// Resolve computes the whole round atomically and advances SECRET_PLANNING →
+// RESOLUTION, returning the animation timeline the room broadcasts and the
+// client animates.
+func (e *Engine) Resolve() (Resolution, error) {
+	if e.state.Phase != PhaseSecretPlanning {
+		return Resolution{}, ErrWrongPhase
+	}
+	e.state.Phase = PhaseResolution
+	return resolveRound(&e.state), nil
+}
+
+// BeginRoundSummary advances RESOLUTION → ROUND_SUMMARY.
+func (e *Engine) BeginRoundSummary() error {
+	if e.state.Phase != PhaseResolution {
+		return ErrWrongPhase
+	}
+	e.state.Phase = PhaseRoundSummary
+	return nil
+}
+
+// AdvanceRound advances ROUND_SUMMARY to the next round's INCOME phase, or to
+// GAME_OVER if the match ended (Domination or the final round).
+func (e *Engine) AdvanceRound() error {
+	if e.state.Phase != PhaseRoundSummary {
+		return ErrWrongPhase
+	}
+	if e.state.pendingGameOver {
+		e.state.Phase = PhaseGameOver
+		return nil
+	}
+	e.state.Round++
+	e.state.Declarations = map[PlayerID]Declaration{}
+	e.state.Orders = map[PlayerID]OrderSet{}
+	e.state.Phase = PhaseIncome
+	return nil
+}
+
+// ---- Resign ----
+
+// Resign permanently removes a player from the active match: they forfeit,
+// their pending declaration/orders are cancelled, and their territories are
+// cleaned up (non-capital tiles go neutral, armies and structures removed,
+// neutral relics regain a guardian, their capital goes inactive but stays
+// untargetable). Idempotent. This never mutates the board mid-resolution — the
+// room only calls it at a safe phase boundary.
+func (e *Engine) Resign(by PlayerID) error {
+	p := e.state.player(by)
+	if p == nil {
+		return ErrUnknownPlayer
+	}
+	if p.Forfeited {
+		return nil
+	}
+	p.Forfeited = true
+	delete(e.state.Declarations, by)
+	delete(e.state.Orders, by)
+	for _, tid := range e.state.SortedTileIDs() {
+		t := e.state.Tiles[tid]
+		if t.Owner != by {
+			continue
+		}
+		if t.Type == TileCapital {
+			t.Armies = 0 // inactive; still owned + untargetable
+			continue
+		}
+		wasRelic := t.Type == TileRelic
+		t.Owner = ""
+		t.Structure = StructureNone
+		if wasRelic {
+			t.Armies = NeutralRelicGuardian
+		} else {
+			t.Armies = 0
+		}
+	}
+	e.ensureHostValid()
+	return nil
+}
+
+// EndForfeitIfAlone ends the match immediately (Forfeit, or No Contest) if
+// only one (or zero) active player remains after a resign. Reports whether the
+// match ended.
+func (e *Engine) EndForfeitIfAlone() bool {
+	if e.state.Phase == PhaseLobby || e.state.Phase == PhaseGameOver {
+		return false
+	}
+	if e.state.endForfeitIfAlone() {
+		e.state.Phase = PhaseGameOver
+		return true
+	}
+	return false
 }

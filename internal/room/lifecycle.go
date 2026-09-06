@@ -1,6 +1,10 @@
 package room
 
-import "time"
+import (
+	"time"
+
+	"github.com/RishabJain30/fauxtist/internal/game"
+)
 
 // RoomOption configures optional Room construction-time behavior.
 type RoomOption func(*Room)
@@ -11,6 +15,14 @@ type RoomOption func(*Room)
 // time.Now.
 func WithClock(clock func() time.Time) RoomOption {
 	return func(r *Room) { r.clock = clock }
+}
+
+// WithPhaseDuration overrides how long each timed phase lasts, so tests can
+// drive a whole match in milliseconds instead of the preset's real timings.
+// Production never sets it. Return a non-positive duration for a phase to make
+// it effectively instant.
+func WithPhaseDuration(fn func(game.Phase) time.Duration) RoomOption {
+	return func(r *Room) { r.phaseDurOverride = fn }
 }
 
 // touch records that something meaningful just happened in this room —

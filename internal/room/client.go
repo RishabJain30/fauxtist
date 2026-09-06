@@ -14,18 +14,22 @@ import (
 // from under a still-connected client (expiry or process shutdown).
 const closeRoomClosed = websocket.StatusCode(wsproto.CloseRoomClosed)
 
+// closeNormal is a graceful 1000 closure (leave-for-now, resign, host kick).
+const closeNormal = websocket.StatusNormalClosure
+
 // Client is one player's live WebSocket connection. ConnID identifies this
 // specific connection instance for a seat; a later reconnect mints a new
 // Client with a new ConnID, and the old one is closed and no longer
 // authoritative for its PlayerID.
 type Client struct {
-	PlayerID game.PlayerID
-	ConnID   uint64
-	Name     string
-	Emoji    string
-	conn     *websocket.Conn
-	send     chan wsproto.Envelope
-	limiters *rateLimiters
+	PlayerID  game.PlayerID
+	ConnID    uint64
+	Name      string
+	Emoji     string
+	Spectator bool
+	conn      *websocket.Conn
+	send      chan wsproto.Envelope
+	limiters  *rateLimiters
 
 	// consecutiveRateLimited counts back-to-back rejected messages since
 	// the last one that was actually processed. Only ever touched from the
