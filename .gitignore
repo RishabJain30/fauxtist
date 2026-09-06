@@ -20,3 +20,9 @@ coverage.*
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# Playwright E2E artifacts
+/web/test-results/
+/web/playwright-report/
+/web/blob-report/
+/web/.playwright/

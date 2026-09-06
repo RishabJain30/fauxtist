@@ -41,6 +41,9 @@ var msVars = []string{
 	"FAUXTIST_RECONNECT_GRACE_MS",
 	"FAUXTIST_EARLY_COUNTDOWN_MS",
 	"FAUXTIST_SOLO_WAIT_MS",
+	// E2E/dev-only: when set, every timed gameplay phase is shortened to this
+	// many milliseconds (see cmd/fauxtist/main.go). Unset in production.
+	"FAUXTIST_FAST_PHASES_MS",
 	"FAUXTIST_EMPTY_ROOM_TTL_MS",
 	"FAUXTIST_ROOM_SWEEP_INTERVAL_MS",
 	"FAUXTIST_HEARTBEAT_INTERVAL_MS",

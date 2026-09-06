@@ -9,9 +9,15 @@ import "net/http"
 // site. connect-src intentionally omits the STUN/TURN URLs configured via
 // FAUXTIST_STUN_URLS/FAUXTIST_TURN_URLS — WebRTC's ICE traffic is UDP,
 // not fetch/WebSocket, and CSP's connect-src does not govern it.
+//
+// worker-src allows same-origin blob workers: canvas-confetti (the victory
+// effect) spawns a Web Worker from a blob URL our own bundle creates. External
+// and inline scripts remain blocked by script-src 'self'; this only lets our
+// own code run its own worker off-thread instead of degrading to the main one.
 const contentSecurityPolicy = "" +
 	"default-src 'self'; " +
 	"script-src 'self'; " +
+	"worker-src 'self' blob:; " +
 	"style-src 'self' 'unsafe-inline'; " +
 	"img-src 'self' data:; " +
 	"font-src 'self'; " +

@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"github.com/RishabJain30/fauxtist/internal/envconfig"
+	"github.com/RishabJain30/fauxtist/internal/game"
 	"github.com/RishabJain30/fauxtist/internal/hub"
+	"github.com/RishabJain30/fauxtist/internal/room"
 	"github.com/RishabJain30/fauxtist/internal/server"
 )
 
@@ -56,7 +58,16 @@ func run() int {
 		return 1
 	}
 
-	h := hub.New()
+	var hubOpts []hub.Option
+	// E2E/dev-only: shorten every timed gameplay phase to a fixed duration so
+	// an end-to-end test can drive a whole match in seconds. Unset in
+	// production; validated by envconfig.Validate above.
+	if fast, _ := envconfig.PositiveDurationMS("FAUXTIST_FAST_PHASES_MS", 0); fast > 0 {
+		logger.Warn("FAUXTIST_FAST_PHASES_MS set — gameplay phases shortened (E2E/dev only)", "ms", fast.Milliseconds())
+		hubOpts = append(hubOpts, hub.WithRoomOptions(room.WithPhaseDuration(func(game.Phase) time.Duration { return fast })))
+	}
+
+	h := hub.New(hubOpts...)
 	defer h.Close()
 
 	srv := server.New(h, server.WithAllowedOrigins(origins), server.WithLogger(logger))
