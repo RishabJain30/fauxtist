@@ -9,5 +9,7 @@ export default defineConfig({
       '/ws': { target: 'ws://localhost:8080', ws: true },
     },
   },
-  test: { environment: 'node' },
+  // Vitest runs the unit tests under src/ only. The Playwright browser E2E
+  // specs live under e2e/ and are run by `npm run test:e2e`, never by vitest.
+  test: { environment: 'node', include: ['src/**/*.test.{js,jsx}'] },
 })
